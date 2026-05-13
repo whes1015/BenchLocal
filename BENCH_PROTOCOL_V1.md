@@ -205,6 +205,7 @@ type GenerationRequest = {
   top_k?: number;
   min_p?: number;
   repetition_penalty?: number;
+  presence_penalty?: number;
   request_timeout_seconds?: number;
 };
 ```
