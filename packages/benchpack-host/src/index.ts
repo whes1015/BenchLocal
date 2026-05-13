@@ -3543,7 +3543,8 @@ export async function retryScenarioForBenchPackRun(
         message: `Retrying ${scenario.title} for ${model.label}.`
       });
 
-      const result = await prepared.runScenario(
+      const result = await runScenarioSafely(
+        prepared,
         {
           runId: existingSummary.runId,
           benchPackId,

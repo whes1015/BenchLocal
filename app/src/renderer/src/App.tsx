@@ -5484,6 +5484,7 @@ function BenchmarkSection({
 
     const tone =
       result.status === "pass" ? "result-pass" : result.status === "partial" ? "result-partial" : "result-fail";
+    const durationLabel = formatDurationMs(result.timings?.durationMs);
 
     return (
       <button
@@ -5501,9 +5502,11 @@ function BenchmarkSection({
             timings: result.timings
           })
         }
-        className={`result-icon-button ${tone}`}
+        className={`result-icon-button ${tone}${durationLabel ? " has-duration" : ""}`}
+        title={durationLabel ? `${result.status} · ${durationLabel}` : result.status}
       >
-        {result.status === "pass" ? "✓" : result.status === "partial" ? "!" : "×"}
+        <span className="result-icon-mark">{result.status === "pass" ? "✓" : result.status === "partial" ? "!" : "×"}</span>
+        {durationLabel ? <span className="result-duration">{durationLabel}</span> : null}
       </button>
     );
   }
