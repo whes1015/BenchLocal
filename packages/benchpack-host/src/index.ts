@@ -1764,6 +1764,22 @@ function compactGenerationRequest(input?: GenerationRequest): GenerationRequest 
   ) as GenerationRequest;
 }
 
+function getRunsPerScenario(generation: GenerationRequest): number {
+  const rawCount = (generation as Record<string, unknown>).runs_per_scenario;
+
+  if (typeof rawCount !== "number" || !Number.isFinite(rawCount)) {
+    return 1;
+  }
+
+  return Math.max(1, Math.floor(rawCount));
+}
+
+function stripHostGenerationControls(generation: GenerationRequest): GenerationRequest {
+  const providerGeneration = { ...(generation as Record<string, unknown>) };
+  delete providerGeneration.runs_per_scenario;
+  return compactGenerationRequest(providerGeneration as GenerationRequest);
+}
+
 function resolveBenchPackGeneration(
   manifest: BenchPackManifest,
   overrides?: GenerationRequest
@@ -2882,7 +2898,7 @@ async function executeSerialTestCasesMode(
 
     for (const model of runnableModels) {
       throwIfAborted(abortSignal);
-      const result = await runScenarioSafely(
+      const result = await runScenarioWithRepeats(
         prepared,
         {
           runId,
@@ -2934,6 +2950,57 @@ function buildScenarioExecutionFailureResult(
   };
 }
 
+function averageDefined(values: Array<number | undefined>): number | undefined {
+  const definedValues = values.filter((value): value is number => value !== undefined && Number.isFinite(value));
+
+  if (definedValues.length === 0) {
+    return undefined;
+  }
+
+  return definedValues.reduce((total, value) => total + value, 0) / definedValues.length;
+}
+
+function aggregateRepeatedScenarioResults(results: ScenarioResult[]): ScenarioResult {
+  if (results.length <= 1) {
+    return results[0];
+  }
+
+  const first = results[0];
+  const passCount = results.filter((result) => result.status === "pass").length;
+  const failCount = results.filter((result) => result.status === "fail").length;
+  const score = averageDefined(results.map((result) => result.score));
+  const points = averageDefined(results.map((result) => result.points));
+  const startedAt = results.find((result) => result.timings?.startedAt)?.timings?.startedAt;
+  const completedAt = [...results].reverse().find((result) => result.timings?.completedAt)?.timings?.completedAt;
+  const durationMs = results.reduce((total, result) => total + (result.timings?.durationMs ?? 0), 0);
+
+  return {
+    ...first,
+    status: passCount === results.length ? "pass" : failCount === results.length ? "fail" : "partial",
+    score,
+    points,
+    summary: `Average across ${results.length} runs: ${passCount}/${results.length} passed.`,
+    note: [
+      first.note,
+      score === undefined ? undefined : `Average score: ${Number(score.toFixed(3))}.`
+    ].filter(Boolean).join(" "),
+    rawLog: results
+      .map((result, index) => [
+        `--- run ${index + 1}/${results.length} ---`,
+        result.rawLog
+      ].join("\n"))
+      .join("\n\n"),
+    output: results[results.length - 1].output,
+    verifier: results[results.length - 1].verifier,
+    artifacts: results.flatMap((result) => result.artifacts ?? []),
+    timings: {
+      startedAt,
+      completedAt,
+      durationMs
+    }
+  };
+}
+
 async function runScenarioSafely(
   prepared: Awaited<ReturnType<LoadedBenchPackRuntime["prepare"]>>,
   input: {
@@ -2957,6 +3024,57 @@ async function runScenarioSafely(
 
     return buildScenarioExecutionFailureResult(input.scenario, error, startedAt);
   }
+}
+
+async function runScenarioWithRepeats(
+  prepared: Awaited<ReturnType<LoadedBenchPackRuntime["prepare"]>>,
+  input: {
+    runId: string;
+    benchPackId: string;
+    scenario: ScenarioMeta;
+    model: RegisteredModel;
+    abortSignal?: AbortSignal;
+    generation: GenerationRequest;
+  },
+  emit: (event: ProgressEvent) => Promise<void>
+): Promise<ScenarioResult> {
+  const runsPerScenario = getRunsPerScenario(input.generation);
+  const providerGeneration = stripHostGenerationControls(input.generation);
+
+  if (runsPerScenario <= 1) {
+    return runScenarioSafely(
+      prepared,
+      {
+        ...input,
+        generation: providerGeneration
+      },
+      emit
+    );
+  }
+
+  const results: ScenarioResult[] = [];
+
+  for (let runIndex = 0; runIndex < runsPerScenario; runIndex += 1) {
+    throwIfAborted(input.abortSignal);
+    await emit({
+      type: "model_progress",
+      modelId: input.model.id,
+      scenarioId: input.scenario.id,
+      message: `Running attempt ${runIndex + 1}/${runsPerScenario}.`
+    });
+    results.push(
+      await runScenarioSafely(
+        prepared,
+        {
+          ...input,
+          generation: providerGeneration
+        },
+        emit
+      )
+    );
+  }
+
+  return aggregateRepeatedScenarioResults(results);
 }
 
 async function executeSerialByModelMode(
@@ -3001,7 +3119,7 @@ async function executeSerialByModelMode(
         });
       }
 
-      const result = await runScenarioSafely(
+      const result = await runScenarioWithRepeats(
         prepared,
         {
           runId,
@@ -3073,7 +3191,7 @@ async function executeParallelModelsMode(
           });
         }
 
-        const result = await runScenarioSafely(
+        const result = await runScenarioWithRepeats(
           prepared,
           {
             runId,
@@ -3133,7 +3251,7 @@ async function executeParallelTestCasesMode(
 
     const scenarioResults = await Promise.all(
       runnableModels.map(async (model) => {
-        const result = await runScenarioSafely(
+        const result = await runScenarioWithRepeats(
           prepared,
           {
             runId,
@@ -3193,7 +3311,7 @@ async function executeFullParallelMode(
 
       const scenarioResults = await Promise.all(
         runnableModels.map(async (model) => {
-          const result = await runScenarioSafely(
+          const result = await runScenarioWithRepeats(
             prepared,
             {
               runId,

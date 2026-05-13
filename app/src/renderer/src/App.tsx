@@ -193,6 +193,7 @@ type SamplingFormState = {
   top_k: string;
   min_p: string;
   repetition_penalty: string;
+  runs_per_scenario: string;
   request_timeout_seconds: string;
 };
 
@@ -347,6 +348,7 @@ const SAMPLING_FIELDS: Array<{
   { key: "top_k", label: "Top K", placeholder: "Leave blank", integer: true },
   { key: "min_p", label: "Min P", placeholder: "Leave blank" },
   { key: "repetition_penalty", label: "Repetition Penalty", placeholder: "Leave blank" },
+  { key: "runs_per_scenario", label: "Runs Per Scenario", placeholder: "1", integer: true },
   { key: "request_timeout_seconds", label: "Request Timeout Seconds", placeholder: "Leave blank", integer: true }
 ];
 
@@ -475,6 +477,7 @@ function createSamplingForm(input?: GenerationRequest): SamplingFormState {
     top_k: input?.top_k?.toString() ?? "",
     min_p: input?.min_p?.toString() ?? "",
     repetition_penalty: input?.repetition_penalty?.toString() ?? "",
+    runs_per_scenario: input?.runs_per_scenario?.toString() ?? "",
     request_timeout_seconds: input?.request_timeout_seconds?.toString() ?? ""
   };
 }

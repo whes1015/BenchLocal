@@ -249,6 +249,7 @@ export interface GenerationRequest {
   top_k?: number;
   min_p?: number;
   repetition_penalty?: number;
+  runs_per_scenario?: number;
   request_timeout_seconds?: number;
 }
 
