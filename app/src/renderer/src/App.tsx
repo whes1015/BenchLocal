@@ -198,6 +198,8 @@ type DetailModalState = {
   summary: string;
   rawLog: string;
   status: "pass" | "partial" | "fail";
+  errorType?: ScenarioResult["errorType"];
+  retryable?: boolean;
   timings?: ScenarioResult["timings"];
 };
 
@@ -890,6 +892,11 @@ type ReplayCell = {
   result: ScenarioResult;
 };
 
+type RetryScenarioCell = {
+  modelId: string;
+  scenarioId: string;
+};
+
 function buildReplayGroups(
   summary: BenchPackRunSummary,
   scenarios: ScenarioMeta[],
@@ -950,6 +957,49 @@ function buildReplayGroups(
       ].filter((group) => group.length > 0);
     default:
       return singletonCellsByScenarioThenModel;
+  }
+}
+
+function groupRetryCellsForExecutionMode(
+  cells: RetryScenarioCell[],
+  executionMode: BenchLocalExecutionMode,
+  scenarios: ScenarioMeta[],
+  models: ResolvedTabModel[]
+): RetryScenarioCell[][] {
+  const cellSet = new Set(cells.map((cell) => getCellKey(cell.modelId, cell.scenarioId)));
+  const scenarioOrder = scenarios.map((scenario) => scenario.id);
+  const modelOrder = models.map((model) => model.id);
+  const cellFor = (modelId: string, scenarioId: string): RetryScenarioCell | null =>
+    cellSet.has(getCellKey(modelId, scenarioId)) ? { modelId, scenarioId } : null;
+  const singletonByScenarioThenModel = scenarioOrder.flatMap((scenarioId) =>
+    modelOrder.flatMap((modelId) => {
+      const cell = cellFor(modelId, scenarioId);
+      return cell ? [[cell]] : [];
+    })
+  );
+
+  switch (executionMode) {
+    case "serial":
+      return singletonByScenarioThenModel;
+    case "serial_by_model":
+      return modelOrder.flatMap((modelId) =>
+        scenarioOrder.flatMap((scenarioId) => {
+          const cell = cellFor(modelId, scenarioId);
+          return cell ? [[cell]] : [];
+        })
+      );
+    case "parallel_by_test_case":
+      return scenarioOrder
+        .map((scenarioId) => modelOrder.flatMap((modelId) => cellFor(modelId, scenarioId) ?? []))
+        .filter((group) => group.length > 0);
+    case "parallel_by_model":
+      return modelOrder
+        .map((modelId) => scenarioOrder.flatMap((scenarioId) => cellFor(modelId, scenarioId) ?? []))
+        .filter((group) => group.length > 0);
+    case "full_parallel":
+      return [singletonByScenarioThenModel.flat()].filter((group) => group.length > 0);
+    default:
+      return singletonByScenarioThenModel;
   }
 }
 
@@ -1037,6 +1087,10 @@ function detailModalKey(detail: Pick<DetailModalState, "tabId" | "modelId" | "sc
 
 function getCellKey(modelId: string, scenarioId: string): string {
   return `${modelId}::${scenarioId}`;
+}
+
+function isProviderErrorResult(result: ScenarioResult | undefined): boolean {
+  return result?.errorType === "provider_error";
 }
 
 const REGISTRY_UNAVAILABLE_MESSAGE =
@@ -3331,6 +3385,117 @@ export function App() {
     }
   };
 
+  const retryScenarioCells = async (
+    tab: BenchLocalWorkspaceTab,
+    inspection: BenchPackInspection,
+    models: ResolvedTabModel[],
+    cells: RetryScenarioCell[],
+    label: string
+  ) => {
+    if (cells.length === 0) {
+      return;
+    }
+
+    if (!workspaceState) {
+      return;
+    }
+
+    if (!tab.benchPackId) {
+      setError("This tab does not have a Bench Pack selected.");
+      return;
+    }
+
+    const summary = runSummaries[tab.id];
+
+    if (!summary?.runId) {
+      setError("Run this Bench Pack before retrying individual results.");
+      return;
+    }
+
+    if (hasUnsavedChanges) {
+      const saved = await save();
+
+      if (!saved) {
+        return;
+      }
+    }
+
+    const activeCellKeys = cells.map((cell) => getCellKey(cell.modelId, cell.scenarioId));
+    setLiveRuns((current) => {
+      const existing = current[tab.id];
+      const mergedActiveKeys = Array.from(new Set([...(existing?.activeCellKeys ?? []), ...activeCellKeys]));
+
+      return {
+        ...current,
+        [tab.id]: {
+          runId: existing?.runId ?? summary.runId,
+          events: existing?.events ?? [],
+          resultsByModel: existing?.resultsByModel ?? {},
+          activeCellKeys: mergedActiveKeys
+        }
+      };
+    });
+
+    const retryGroups = groupRetryCellsForExecutionMode(cells, tab.executionMode, inspection.scenarios ?? [], models);
+    const failures: string[] = [];
+
+    const retryCell = async (cell: RetryScenarioCell) => {
+      try {
+        await window.benchlocal.benchPacks.retryScenario({
+          tabId: tab.id,
+          benchPackId: tab.benchPackId!,
+          runId: summary.runId,
+          scenarioId: cell.scenarioId,
+          modelId: cell.modelId,
+          generation: tab.samplingOverrides
+        });
+      } catch (retryError) {
+        failures.push(`${cell.modelId} / ${cell.scenarioId}`);
+      }
+    };
+
+    try {
+      for (const group of retryGroups) {
+        await Promise.all(group.map((cell) => retryCell(cell)));
+      }
+
+      const refreshedSummary = await window.benchlocal.benchPacks.loadHistory({
+        benchPackId: tab.benchPackId,
+        runId: summary.runId
+      });
+
+      if (!activeRuns[tab.id]) {
+        setRunSummaries((current) => ({
+          ...current,
+          [tab.id]: refreshedSummary
+        }));
+      }
+
+      await loadHistoryForBenchPack(tab.benchPackId);
+      setAppNotice(`Retried ${cells.length - failures.length}/${cells.length} ${label}.`);
+
+      if (failures.length > 0) {
+        setError(`Some retries did not complete: ${failures.slice(0, 3).join(", ")}${failures.length > 3 ? "..." : ""}`);
+      }
+    } finally {
+      setLiveRuns((current) => {
+        const existing = current[tab.id];
+
+        if (!existing) {
+          return current;
+        }
+
+        return {
+          ...current,
+          [tab.id]: {
+            ...existing,
+            activeCellKeys: existing.activeCellKeys.filter((key) => !activeCellKeys.includes(key))
+          }
+        };
+      });
+    }
+  };
+
   const clearLoadedHistoryRun = (tabId: string) => {
     updateWorkspaceState((current) => {
       const tab = current.tabs[tabId];
@@ -4355,6 +4520,9 @@ export function App() {
                                 )
                               }
 	                            onStop={() => void stopTabRun(activeTab.id)}
+                              onRetryCells={(cells, label) =>
+                                void retryScenarioCells(activeTab, activeInspection, activeDisplayModels, cells, label)
+                              }
 	                            onOpenDetail={setDetailModal}
 	                          />
 	                        ) : (
@@ -4959,18 +5127,22 @@ export function App() {
           <div className="dialog-summary">
             <div className="dialog-summary-copy">
               <span className="dialog-summary-label">Status</span>
-              <span className="dialog-summary-value">Validation Result</span>
+              <span className="dialog-summary-value">
+                {detailModal.errorType === "provider_error" ? "Provider or Network Error" : "Validation Result"}
+              </span>
             </div>
             <span
               className={`status-chip ${
-                detailModal.status === "pass"
+                detailModal.errorType === "provider_error"
+                  ? "status-idle"
+                  : detailModal.status === "pass"
                   ? "status-done"
                   : detailModal.status === "partial"
                     ? "status-not-installed"
                     : "status-danger"
               }`}
             >
-              {detailModal.status}
+              {detailModal.errorType === "provider_error" ? "provider error" : detailModal.status}
             </span>
           </div>
           {detailModal.timings?.durationMs !== undefined ? (
@@ -5235,6 +5407,7 @@ function BenchmarkSection({
   onClearHistory,
   onRun,
   onStop,
+  onRetryCells,
   onOpenDetail
 }: {
   tabId: string;
@@ -5262,6 +5435,7 @@ function BenchmarkSection({
   onClearHistory: () => void;
   onRun: () => void;
   onStop: () => void;
+  onRetryCells: (cells: RetryScenarioCell[], label: string) => void;
   onOpenDetail: (detail: DetailModalState) => void;
 }) {
   const [runModeOpen, setRunModeOpen] = useState(false);
@@ -5316,6 +5490,20 @@ function BenchmarkSection({
       ? ((tableScrollMetrics.scrollLeft / Math.max(1, tableScrollMetrics.scrollWidth - tableScrollMetrics.clientWidth)) *
           Math.max(0, tableScrollbarTrackRef.current.clientWidth - scrollbarThumbWidth))
       : 0;
+  const completedResultCells = selectedModels.flatMap((model) =>
+    scenarios.flatMap((scenario) => {
+      const result = runSummary?.resultsByModel[model.id]?.find((candidate) => candidate.scenarioId === scenario.id);
+      return result ? [{ modelId: model.id, scenarioId: scenario.id, result }] : [];
+    })
+  );
+  const providerErrorRetryCells = completedResultCells
+    .filter(({ result }) => isProviderErrorResult(result))
+    .map(({ modelId, scenarioId }) => ({ modelId, scenarioId }));
+  const failedRetryCells = completedResultCells
+    .filter(({ result }) => result.status === "fail" && !isProviderErrorResult(result))
+    .map(({ modelId, scenarioId }) => ({ modelId, scenarioId }));
+  const canRetryResultCells =
+    Boolean(runSummary?.runId) && !isViewingHistory && !hasLiveActivity && !isStopping && inspection.status === "ready";
 
   useEffect(() => {
     if (!runModeOpen) {
@@ -5482,9 +5670,12 @@ function BenchmarkSection({
       );
     }
 
-    const tone =
-      result.status === "pass" ? "result-pass" : result.status === "partial" ? "result-partial" : "result-fail";
+    const isProviderError = isProviderErrorResult(result);
+    const tone = isProviderError
+      ? "result-provider-error"
+      : result.status === "pass" ? "result-pass" : result.status === "partial" ? "result-partial" : "result-fail";
     const durationLabel = formatDurationMs(result.timings?.durationMs);
+    const resultLabel = isProviderError ? "provider error" : result.status;
 
     return (
       <button
@@ -5499,13 +5690,17 @@ function BenchmarkSection({
             summary: result.summary,
             rawLog: result.rawLog,
             status: result.status,
+            errorType: result.errorType,
+            retryable: result.retryable,
             timings: result.timings
           })
         }
         className={`result-icon-button ${tone}${durationLabel ? " has-duration" : ""}`}
-        title={durationLabel ? `${result.status} · ${durationLabel}` : result.status}
+        title={durationLabel ? `${resultLabel} · ${durationLabel}` : resultLabel}
       >
-        <span className="result-icon-mark">{result.status === "pass" ? "✓" : result.status === "partial" ? "!" : "×"}</span>
+        <span className="result-icon-mark">
+          {isProviderError ? <CircleAlert size={14} strokeWidth={2.4} /> : result.status === "pass" ? "✓" : result.status === "partial" ? "!" : "×"}
+        </span>
         {durationLabel ? <span className="result-duration">{durationLabel}</span> : null}
       </button>
     );
@@ -5819,6 +6014,28 @@ function BenchmarkSection({
                         document.body.style.userSelect = "none";
                       }}
                     />
+                  </div>
+                ) : null}
+                {runSummary ? (
+                  <div className="table-retry-actions">
+                    <button
+                      type="button"
+                      className="ghost-button ghost-button-compact"
+                      disabled={!canRetryResultCells || providerErrorRetryCells.length === 0}
+                      onClick={() => onRetryCells(providerErrorRetryCells, "provider errors")}
+                    >
+                      <CircleAlert size={14} />
+                      Retry Provider Errors
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost-button ghost-button-compact"
+                      disabled={!canRetryResultCells || failedRetryCells.length === 0}
+                      onClick={() => onRetryCells(failedRetryCells, "failed results")}
+                    >
+                      <RotateCcw size={14} />
+                      Retry Failed Results
+                    </button>
                   </div>
                 ) : null}
               </>

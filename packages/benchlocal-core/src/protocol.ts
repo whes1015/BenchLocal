@@ -304,6 +304,8 @@ export interface ArtifactRef {
 export interface ScenarioResult {
   scenarioId: string;
   status: "pass" | "partial" | "fail";
+  errorType?: "provider_error" | "execution_error";
+  retryable?: boolean;
   score?: number;
   points?: number;
   summary: string;
