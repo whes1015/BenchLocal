@@ -11,6 +11,7 @@ const isDev = !app.isPackaged;
 const shouldOpenDevTools = process.env.BENCHLOCAL_OPEN_DEVTOOLS === "1";
 const isMac = process.platform === "darwin";
 let isQuittingAfterBenchPackShutdown = false;
+let isPreparingToQuit = false;
 const DEFAULT_WINDOW_WIDTH = 1500;
 const DEFAULT_WINDOW_HEIGHT = 800;
 const MIN_WINDOW_WIDTH = 1180;
@@ -68,6 +69,25 @@ if (isMac) {
   app.setName("BenchLocal");
 }
 
+function requestAppQuit(): void {
+  if (isPreparingToQuit || isQuittingAfterBenchPackShutdown) {
+    return;
+  }
+
+  isPreparingToQuit = true;
+  void (async () => {
+    try {
+      await stopActiveBenchPackRunsForShutdown();
+    } catch (error) {
+      console.error("[benchlocal] failed to stop active Bench Pack runs during shutdown", error);
+    } finally {
+      isQuittingAfterBenchPackShutdown = true;
+      isPreparingToQuit = false;
+      app.quit();
+    }
+  })();
+}
+
 function buildApplicationMenu(appName: string): void {
   const openAbout = () => {
     if (isMac) {
@@ -107,7 +127,11 @@ function buildApplicationMenu(appName: string): void {
         { role: "hideOthers" },
         { role: "unhide" },
         { type: "separator" },
-        { role: "quit" }
+        {
+          label: `Quit ${appName}`,
+          accelerator: "Cmd+Q",
+          click: requestAppQuit
+        }
       ]
     : [
         {
@@ -130,7 +154,11 @@ function buildApplicationMenu(appName: string): void {
             ]
           : []),
         { type: "separator" },
-        { role: "quit" }
+        {
+          label: "Quit",
+          accelerator: "CmdOrCtrl+Q",
+          click: requestAppQuit
+        }
       ];
   const windowSubmenu: MenuItemConstructorOptions[] = isMac
     ? [{ role: "minimize" }, { role: "zoom" }, { type: "separator" }, { role: "front" }]
@@ -256,12 +284,6 @@ async function createMainWindow(): Promise<void> {
     });
   });
 
-  window.on("closed", () => {
-    if (isMac && !isQuittingAfterBenchPackShutdown) {
-      app.quit();
-    }
-  });
-
   if (!isDev) {
     window.webContents.on("before-input-event", (event, input) => {
       const isReloadShortcut =
@@ -317,16 +339,7 @@ app.on("before-quit", (event) => {
   }
 
   event.preventDefault();
-  void (async () => {
-    try {
-      await stopActiveBenchPackRunsForShutdown();
-    } catch (error) {
-      console.error("[benchlocal] failed to stop active Bench Pack runs during shutdown", error);
-    } finally {
-      isQuittingAfterBenchPackShutdown = true;
-      app.quit();
-    }
-  })();
+  requestAppQuit();
 });
 
 app.on("window-all-closed", () => {
