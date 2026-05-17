@@ -2213,6 +2213,20 @@ function getProviderBaseUrlById(providers: HostContext["providers"]): Map<string
   return new Map(providers.map((provider) => [provider.id, provider.baseUrl]));
 }
 
+function fallbackProviderDisplayName(providerId: string): string {
+  const trimmed = providerId.trim();
+
+  if (/^openai[_-]compatible-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {
+    return "OpenAI Compatible";
+  }
+
+  return trimmed || "Unknown Provider";
+}
+
+function getProviderDisplayName(provider: HostContext["providers"][number] | undefined, providerId: string): string {
+  return provider?.name?.trim() || fallbackProviderDisplayName(providerId);
+}
+
 function mergeSummaryEvents(current: ProgressEvent[], persisted?: ProgressEvent[]): ProgressEvent[] {
   if (!persisted || persisted.length <= current.length) {
     return current;
@@ -2414,16 +2428,18 @@ async function checkModelAvailability(
     if (!provider) {
       results.push(
         ...providerModels.map((model) =>
-          createModelAvailability(model, "offline", "provider_missing", checkedAt, `Provider "${providerId}" was not found.`)
+          createModelAvailability(model, "offline", "provider_missing", checkedAt, `Provider "${getProviderDisplayName(provider, providerId)}" was not found.`)
         )
       );
       return;
     }
 
+    const providerName = getProviderDisplayName(provider, providerId);
+
     if (!provider.enabled) {
       results.push(
         ...providerModels.map((model) =>
-          createModelAvailability(model, "offline", "provider_disabled", checkedAt, `Provider "${provider.name}" is disabled.`)
+          createModelAvailability(model, "offline", "provider_disabled", checkedAt, `Provider "${providerName}" is disabled.`)
         )
       );
       return;
@@ -2434,7 +2450,7 @@ async function checkModelAvailability(
     if (provider.authMode === "bearer" && !secret?.value) {
       results.push(
         ...providerModels.map((model) =>
-          createModelAvailability(model, "offline", "auth_missing", checkedAt, `Provider "${provider.name}" requires an API key.`)
+          createModelAvailability(model, "offline", "auth_missing", checkedAt, `Provider "${providerName}" requires an API key.`)
         )
       );
       return;
@@ -2458,7 +2474,7 @@ async function checkModelAvailability(
 
       results.push(
         ...providerModels.map((model) =>
-          createModelAvailability(model, "offline", "provider_unreachable", checkedAt, `Provider "${provider.name}" is unreachable: ${toErrorMessage(error)}`)
+          createModelAvailability(model, "offline", "provider_unreachable", checkedAt, `Provider "${providerName}" is unreachable: ${toErrorMessage(error)}`)
         )
       );
       return;
@@ -2467,7 +2483,7 @@ async function checkModelAvailability(
     if (!response.ok) {
       results.push(
         ...providerModels.map((model) =>
-          createModelAvailability(model, "offline", "provider_error", checkedAt, `Provider "${provider.name}" returned ${response.status} ${response.statusText}`.trim())
+          createModelAvailability(model, "offline", "provider_error", checkedAt, `Provider "${providerName}" returned ${response.status} ${response.statusText}`.trim())
         )
       );
       return;
@@ -2479,7 +2495,7 @@ async function checkModelAvailability(
     } catch (error) {
       results.push(
         ...providerModels.map((model) =>
-          createModelAvailability(model, "offline", "provider_error", checkedAt, `Provider "${provider.name}" returned invalid model metadata: ${toErrorMessage(error)}`)
+          createModelAvailability(model, "offline", "provider_error", checkedAt, `Provider "${providerName}" returned invalid model metadata: ${toErrorMessage(error)}`)
         )
       );
       return;
@@ -2499,7 +2515,7 @@ async function checkModelAvailability(
           "offline",
           "model_missing",
           checkedAt,
-          `Provider "${provider.name}" is reachable, but model "${model.model}" is not listed.`
+          `Provider "${providerName}" is reachable, but model "${model.model}" is not listed.`
         )
       );
     }
@@ -2644,6 +2660,7 @@ async function startInferenceRelay(
 
   for (const model of models) {
     const provider = providerMap.get(model.provider);
+    const providerName = getProviderDisplayName(provider, model.provider);
 
     if (!provider) {
       failedEndpoints.push({
@@ -2651,7 +2668,7 @@ async function startInferenceRelay(
         providerId: model.provider,
         transport: "openai_compatible",
         status: "failed",
-        details: `Provider "${model.provider}" was not found.`
+        details: `Provider "${providerName}" was not found.`
       });
       continue;
     }
@@ -2662,7 +2679,7 @@ async function startInferenceRelay(
         providerId: model.provider,
         transport: "openai_compatible",
         status: "failed",
-        details: `Provider "${model.provider}" is configured but disabled.`
+        details: `Provider "${providerName}" is configured but disabled.`
       });
       continue;
     }
@@ -2674,7 +2691,7 @@ async function startInferenceRelay(
         providerId: model.provider,
         transport: "openai_compatible",
         status: "failed",
-        details: `Provider "${model.provider}" requires an API key, but no secret is available.`
+        details: `Provider "${providerName}" requires an API key, but no secret is available.`
       });
       continue;
     }

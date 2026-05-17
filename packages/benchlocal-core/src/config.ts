@@ -232,6 +232,10 @@ function inferProviderName(providerId: string, kind: BenchLocalProviderKind): st
       return "Pico";
     case "openai_compatible":
     default: {
+      if (/^openai[_-]compatible-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(providerId.trim())) {
+        return "OpenAI Compatible";
+      }
+
       const cleaned = providerId.replace(/[_-]+/g, " ").trim();
       if (!cleaned) {
         return "OpenAI Compatible";
@@ -354,11 +358,11 @@ function normalizeConfig(raw: unknown): BenchLocalConfig {
 
   for (const model of config.models) {
     if (seenModelIds.has(model.id)) {
-      throw new Error(`Duplicate model id "${model.id}" found in models.`);
+      throw new Error(`Duplicate model "${model.label || model.model || model.id}" found in models.`);
     }
 
     if (!config.providers[model.provider]) {
-      throw new Error(`Model "${model.id}" references unknown provider "${model.provider}".`);
+      throw new Error(`Model "${model.label || model.model || model.id}" references unknown provider "${inferProviderName(model.provider, inferProviderKind(model.provider))}".`);
     }
 
     seenModelIds.add(model.id);

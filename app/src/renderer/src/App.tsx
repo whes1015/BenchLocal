@@ -196,6 +196,7 @@ type DetailModalState = {
   runId: string | null;
   benchPackId: string;
   modelId: string;
+  modelLabel?: string;
   scenarioId: string;
   summary: string;
   rawLog: string;
@@ -434,6 +435,49 @@ function defaultProviderName(kind: BenchLocalProviderKind): string {
   return providerKindLabel(kind);
 }
 
+function fallbackProviderDisplayName(providerId: string): string {
+  const trimmed = providerId.trim();
+
+  if (/^openai[_-]compatible-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {
+    return "OpenAI Compatible";
+  }
+
+  switch (trimmed) {
+    case "openrouter":
+      return "OpenRouter";
+    case "huggingface":
+      return "Hugging Face";
+    case "ollama":
+      return "Ollama";
+    case "llamacpp":
+      return "llama.cpp";
+    case "mlx":
+      return "MLX";
+    case "lmstudio":
+      return "LM Studio";
+    case "pico":
+      return "Pico";
+    default:
+      return trimmed || "Unknown Provider";
+  }
+}
+
+function getProviderDisplayName(
+  providers: Record<string, BenchLocalProviderConfig>,
+  providerId: string
+): string {
+  return providers[providerId]?.name?.trim() || fallbackProviderDisplayName(providerId);
+}
+
+function getModelDisplayIdentifier(model: Pick<BenchLocalModelConfig, "id" | "model">): string {
+  return model.model.trim() || model.id.split(":").slice(1).join(":").trim() || model.id;
+}
+
+function getModelLabelForMessage(modelId: string, models: ResolvedTabModel[]): string {
+  const model = models.find((candidate) => candidate.id === modelId);
+  return model?.displayLabel ?? model?.label ?? (modelId.split(":").slice(1).join(":").trim() || modelId);
+}
+
 function defaultProviderApiKeyPlaceholder(kind: BenchLocalProviderKind): string {
   switch (kind) {
     case "huggingface":
@@ -580,8 +624,7 @@ function buildModelConfig(
   form: ModelFormState,
   providers: Record<string, BenchLocalProviderConfig>
 ): BenchLocalModelConfig {
-  const provider = providers[form.provider.trim()];
-  const providerLabel = provider?.name?.trim() || form.provider.trim();
+  const providerLabel = getProviderDisplayName(providers, form.provider.trim());
 
   return {
     id: `${form.provider}:${form.model}`.trim(),
@@ -3613,7 +3656,7 @@ export function App() {
         }));
       }
       await loadHistoryForBenchPack(detail.benchPackId);
-      setAppNotice(`Retested ${detail.scenarioId} for ${detail.modelId}.`);
+      setAppNotice(`Retested ${detail.scenarioId} for ${detail.modelLabel ?? detail.modelId}.`);
     } catch (retryError) {
       setLiveRuns((current) => {
         const existing = current[detail.tabId];
@@ -3700,7 +3743,7 @@ export function App() {
           generation: tab.samplingOverrides
         });
       } catch (retryError) {
-        failures.push(`${cell.modelId} / ${cell.scenarioId}`);
+        failures.push(`${getModelLabelForMessage(cell.modelId, models)} / ${cell.scenarioId}`);
       }
     };
 
@@ -3891,6 +3934,7 @@ export function App() {
       return false;
     }
 
+    const providerName = getProviderDisplayName(draft.providers, providerId);
     const removedModelIds = new Set((draft?.models ?? []).filter((model) => model.provider === providerId).map((model) => model.id));
     const previousDraft = cloneConfig(draft);
     const previousLoadConfig = loadState ? cloneConfig(loadState.config) : null;
@@ -3900,7 +3944,7 @@ export function App() {
     nextConfig.models = nextConfig.models.filter((model) => model.provider !== providerId);
 
     const saved = await persistConfig(nextConfig, {
-      notice: `Deleted provider "${providerId}".`,
+      notice: `Deleted provider "${providerName}".`,
       preserveFilesystemDraft: true,
       previousDraft,
       previousLoadConfig
@@ -3950,6 +3994,7 @@ export function App() {
     }
 
     const provider = draft.providers[modelModal.form.provider];
+    const providerName = getProviderDisplayName(draft.providers, modelModal.form.provider);
 
     if (!provider) {
       setError("Select a provider first.");
@@ -3957,7 +4002,7 @@ export function App() {
     }
 
     if (!providerSupportsModelDiscovery(provider)) {
-      setError(`${provider.name} does not support model browsing yet.`);
+      setError(`${providerName} does not support model browsing yet.`);
       return;
     }
 
@@ -3966,7 +4011,7 @@ export function App() {
 
     setModelBrowserModal({
       providerId: modelModal.form.provider,
-      providerName: provider.name,
+      providerName,
       entries: cachedEntries ?? [],
       query: "",
       selectedModelId: modelModal.form.model.trim() || cachedEntries?.[0]?.id || null,
@@ -4000,7 +4045,7 @@ export function App() {
               error:
                 discoverError instanceof Error
                   ? discoverError.message
-                  : `Failed to load models from ${provider.name}.`
+                  : `Failed to load models from ${providerName}.`
             }
           : current
       );
@@ -4020,7 +4065,7 @@ export function App() {
     }
 
     if (!draft?.providers[modelConfig.provider]) {
-      setError(`Model provider "${modelConfig.provider}" does not exist yet.`);
+      setError(`Model provider "${getProviderDisplayName(draft.providers, modelConfig.provider)}" does not exist yet.`);
       return;
     }
 
@@ -5062,10 +5107,7 @@ export function App() {
                   label="Provider"
                   value={modelModal.form.provider}
                   options={providerIds.length > 0 ? providerIds : ["openrouter"]}
-                  getOptionLabel={(value) => {
-                    const provider = draft?.providers[value];
-                    return provider ? provider.name : value;
-                  }}
+                  getOptionLabel={(value) => getProviderDisplayName(draft?.providers ?? {}, value)}
                   onChange={(value) => setModelModal((current) => current ? { ...current, form: { ...current.form, provider: value } } : current)}
                 />
                 <Field label="Group" value={modelModal.form.group} placeholder="primary" onChange={(value) => setModelModal((current) => current ? { ...current, form: { ...current.form, group: value } } : current)} />
@@ -5098,7 +5140,12 @@ export function App() {
                   </div>
                 </label>
                 <Field label="Display Label" value={modelModal.form.label} placeholder="GPT-4.1 via OpenRouter" onChange={(value) => setModelModal((current) => current ? { ...current, form: { ...current.form, label: value } } : current)} />
-                <Field label="Computed ID" value={`${modelModal.form.provider}:${modelModal.form.model}`.replace(/:$/, "")} readOnly onChange={() => undefined} />
+                <Field
+                  label="Display Reference"
+                  value={`${getProviderDisplayName(draft?.providers ?? {}, modelModal.form.provider)}: ${modelModal.form.model}`.replace(/: $/, "")}
+                  readOnly
+                  onChange={() => undefined}
+                />
                 <FieldToggle
                   label="Enabled"
                   checked={modelModal.form.enabled}
@@ -5138,8 +5185,7 @@ export function App() {
                 return current;
               }
 
-              const providerName =
-                draft?.providers[current.form.provider]?.name ?? current.form.provider;
+              const providerName = getProviderDisplayName(draft?.providers ?? {}, current.form.provider);
               const currentDefaultLabel = current.form.model.trim()
                 ? defaultModelLabel(providerName, current.form.model, undefined)
                 : "";
@@ -5437,7 +5483,7 @@ export function App() {
       {detailModal ? (
         <Modal
           title={`${detailModal.benchPackId} · ${detailModal.scenarioId}`}
-          subtitle={`${detailModal.modelId} · ${detailModal.summary}`}
+          subtitle={`${detailModal.modelLabel ?? detailModal.modelId} · ${detailModal.summary}`}
           onClose={() => setDetailModal(null)}
           onSubmit={() => setDetailModal(null)}
           submitLabel="Close"
@@ -6012,6 +6058,7 @@ function BenchmarkSection({
       ? undefined
       : runSummary?.resultsByModel[modelId]?.find((candidate) => candidate.scenarioId === scenarioId);
     const result = liveResult ?? persistedResult;
+    const model = selectedModels.find((candidate) => candidate.id === modelId);
     const isActive = liveRun?.activeCellKeys.includes(`${modelId}::${scenarioId}`) ?? false;
 
     if (isActive) {
@@ -6046,6 +6093,7 @@ function BenchmarkSection({
             runId: liveRun?.runId ?? runSummary?.runId ?? null,
             benchPackId: inspection.id,
             modelId,
+            modelLabel: model?.displayLabel ?? model?.label,
             scenarioId,
             summary: result.summary,
             rawLog: result.rawLog,
@@ -6493,7 +6541,7 @@ function BenchmarkSection({
               {Object.entries(runSummary.scores).map(([modelId, score]) => {
                 const model = selectedModels.find((candidate) => candidate.id === modelId);
                 const hasScoreData = (runSummary.resultsByModel[modelId]?.length ?? 0) > 0;
-                const providerName = model ? providers[model.provider]?.name?.trim() || model.provider : "";
+                const providerName = model ? getProviderDisplayName(providers, model.provider) : "";
                 const modelName = model?.model?.trim();
                 const modelSubtitle =
                   providerName && modelName
@@ -6556,10 +6604,10 @@ function TabModelsModal({
   const providerOptions = [
     { value: "all", label: "All Providers" },
     ...Array.from(new Set(enabledModels.map((model) => model.provider)))
-      .sort((left, right) => (providers[left]?.name ?? left).localeCompare(providers[right]?.name ?? right))
+      .sort((left, right) => getProviderDisplayName(providers, left).localeCompare(getProviderDisplayName(providers, right)))
       .map((providerId) => ({
         value: providerId,
-        label: providers[providerId]?.name ?? providerId
+        label: getProviderDisplayName(providers, providerId)
       }))
   ];
   const groupOptions = [
@@ -6577,8 +6625,9 @@ function TabModelsModal({
     const haystack = [
       model.label,
       model.id,
+      model.model,
       model.group,
-      providers[model.provider]?.name ?? model.provider
+      getProviderDisplayName(providers, model.provider)
     ]
       .filter(Boolean)
       .join(" ")
@@ -6683,28 +6732,29 @@ function TabModelsModal({
               </div>
             ) : filteredAvailableModels.map((model) => {
               const isSelected = selectedIdSet.has(model.id);
+              const providerName = getProviderDisplayName(providers, model.provider);
 
               return (
-              <div key={model.id} className="tab-model-row">
-                <label className="tab-model-toggle">
-                  <input
-                    type="checkbox"
-                    checked={isSelected}
-                    onChange={(event) => toggleModel(model.id, event.target.checked)}
-                    className="h-4 w-4 accent-[var(--accent)]"
-                  />
-                  <span className="tab-model-toggle-copy">
-                    <span className="settings-row-primary">{model.label}</span>
-                    <span className="settings-row-secondary settings-mono-cell">{providers[model.provider]?.name ?? model.provider}</span>
-                    <span className="settings-row-secondary settings-mono-cell">{model.id}</span>
-                  </span>
-                </label>
+                <div key={model.id} className="tab-model-row">
+                  <label className="tab-model-toggle">
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={(event) => toggleModel(model.id, event.target.checked)}
+                      className="h-4 w-4 accent-[var(--accent)]"
+                    />
+                    <span className="tab-model-toggle-copy">
+                      <span className="settings-row-primary">{model.label}</span>
+                      <span className="settings-row-secondary">{providerName}</span>
+                      <span className="settings-row-secondary settings-mono-cell">{getModelDisplayIdentifier(model)}</span>
+                    </span>
+                  </label>
 
-                <div className="tab-model-row-meta">
-                  <span className="status-chip status-idle">{model.group.trim() || "Ungrouped"}</span>
+                  <div className="tab-model-row-meta">
+                    <span className="status-chip status-idle">{model.group.trim() || "Ungrouped"}</span>
+                  </div>
                 </div>
-              </div>
-            );
+              );
             })}
           </div>
         </section>
@@ -6721,6 +6771,7 @@ function TabModelsModal({
               </div>
             ) : selectedModels.map((model) => {
               const selection = selectionMap.get(model.id);
+              const providerName = getProviderDisplayName(providers, model.provider);
 
               return (
                 <div
@@ -6749,7 +6800,8 @@ function TabModelsModal({
                     />
                     <span className="tab-model-toggle-copy">
                       <span className="settings-row-primary">{model.label}</span>
-                      <span className="settings-row-secondary settings-mono-cell">{model.id}</span>
+                      <span className="settings-row-secondary">{providerName}</span>
+                      <span className="settings-row-secondary settings-mono-cell">{getModelDisplayIdentifier(model)}</span>
                     </span>
                   </label>
 
@@ -7489,10 +7541,10 @@ function ModelsView({
   const providerOptions = [
     { value: "all", label: "All Providers" },
     ...Array.from(new Set(models.map((model) => model.provider)))
-      .sort((left, right) => (providers[left]?.name ?? left).localeCompare(providers[right]?.name ?? right))
+      .sort((left, right) => getProviderDisplayName(providers, left).localeCompare(getProviderDisplayName(providers, right)))
       .map((providerId) => ({
         value: providerId,
-        label: providers[providerId]?.name ?? providerId
+        label: getProviderDisplayName(providers, providerId)
       }))
   ];
   const groupOptions = [
@@ -7509,7 +7561,7 @@ function ModelsView({
     .filter(({ model }) => {
       const normalizedGroup = model.group.trim() || "__ungrouped__";
       const normalizedQuery = searchQuery.trim().toLowerCase();
-      const providerName = providers[model.provider]?.name ?? model.provider;
+	      const providerName = getProviderDisplayName(providers, model.provider);
       const haystack = [model.label, model.id, model.model, model.group, providerName, model.provider]
         .filter(Boolean)
         .join(" ")
@@ -7594,16 +7646,16 @@ function ModelsView({
             ) : (
               filteredModels.map(({ model, index }) => (
                 <tr key={`${model.id}-${index}`}>
-                  <td>
-                    <div className="settings-row-primary">{model.label}</div>
-                    <div className="settings-row-secondary settings-mono-cell">{model.id}</div>
-                  </td>
+	                  <td>
+	                    <div className="settings-row-primary">{model.label}</div>
+	                    <div className="settings-row-secondary settings-mono-cell">{getModelDisplayIdentifier(model)}</div>
+	                  </td>
                   <td>
                     <span className={`status-chip ${model.enabled ? "status-ready" : "status-inactive"}`}>
                       {model.enabled ? "active" : "inactive"}
                     </span>
                   </td>
-                  <td>{providers[model.provider]?.name ?? model.provider.split("-")[0] ?? model.provider}</td>
+	                  <td>{getProviderDisplayName(providers, model.provider)}</td>
                   <td className="settings-mono-cell">{model.model}</td>
                   <td>{model.group}</td>
                   <td>
