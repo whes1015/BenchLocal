@@ -1347,6 +1347,10 @@ pre {
   line-height: 1;
 }
 
+.score-value-empty {
+  color: var(--muted);
+}
+
 .scenario-focus {
   padding: 16px;
   background: var(--scenario-focus-bg);

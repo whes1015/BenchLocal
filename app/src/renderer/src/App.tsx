@@ -6492,6 +6492,7 @@ function BenchmarkSection({
             <section className="scoreboard">
               {Object.entries(runSummary.scores).map(([modelId, score]) => {
                 const model = selectedModels.find((candidate) => candidate.id === modelId);
+                const hasScoreData = (runSummary.resultsByModel[modelId]?.length ?? 0) > 0;
                 const providerName = model ? providers[model.provider]?.name?.trim() || model.provider : "";
                 const modelName = model?.model?.trim();
                 const modelSubtitle =
@@ -6506,11 +6507,13 @@ function BenchmarkSection({
                       <p className="muted-copy" style={{ marginTop: "6px", fontSize: "0.76rem" }}>{modelSubtitle}</p>
                     </div>
                     <div className="score-card-foot">
-                      <span className="score-value">{score.totalScore}</span>
+                      <span className={`score-value${hasScoreData ? "" : " score-value-empty"}`}>
+                        {hasScoreData ? score.totalScore : "—"}
+                      </span>
                       <div className="category-chip-row">
                         {score.categories.map((category) => (
                           <span key={category.id} className="status-chip category-chip">
-                            {category.id}: {category.score}
+                            {category.id}: {hasScoreData ? category.score : "—"}
                           </span>
                         ))}
                       </div>
