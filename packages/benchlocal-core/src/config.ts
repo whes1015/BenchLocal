@@ -61,6 +61,11 @@ export type BenchLocalRegistryConfig = {
   official_url: string;
 };
 
+export type BenchLocalAgentConfig = {
+  enabled: boolean;
+  port?: number;
+};
+
 export type BenchLocalConfig = {
   schema_version: 1;
   default_benchpack: string;
@@ -72,6 +77,7 @@ export type BenchLocalConfig = {
   ui: {
     theme: string;
   };
+  agent?: BenchLocalAgentConfig;
   providers: Record<string, BenchLocalProviderConfig>;
   models: BenchLocalModelConfig[];
   benchpacks: Record<string, BenchLocalBenchPackConfig>;
@@ -168,6 +174,14 @@ const ConfigSchema = z.object({
     .default({
       theme: "system"
   }),
+  agent: z
+    .object({
+      enabled: z.boolean().default(false),
+      port: z.number().int().min(0).max(65535).optional()
+    })
+    .default({
+      enabled: false
+    }),
   providers: z.record(z.string(), ProviderSchema).default({}),
   models: z.array(ModelSchema).default([]),
   benchpacks: z.record(z.string(), BenchPackSchema).default({})
@@ -262,6 +276,9 @@ export function createDefaultConfig(): BenchLocalConfig {
     ui: {
       theme: "system"
     },
+    agent: {
+      enabled: false
+    },
     providers: {},
     models: [],
     benchpacks: {}
@@ -337,6 +354,11 @@ function normalizeConfig(raw: unknown): BenchLocalConfig {
     ui: {
       ...defaults.ui,
       ...parsed.ui
+    },
+    agent: {
+      ...(defaults.agent ?? { enabled: false }),
+      ...(parsed.agent ?? {}),
+      port: parsed.agent.port === 0 ? undefined : parsed.agent.port
     },
     providers: normalizedProviders,
     benchpacks: Object.fromEntries(

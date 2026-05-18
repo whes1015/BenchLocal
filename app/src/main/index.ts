@@ -6,6 +6,7 @@ import { loadAppMetadata } from "./app-metadata";
 import { APP_OPEN_ABOUT_CHANNEL, APP_OPEN_SETTINGS_CHANNEL, registerIpcHandlers, stopActiveBenchPackRunsForShutdown } from "./ipc";
 import { loadAvailableTheme } from "./themes";
 import { checkForAppUpdatesInteractively, initializeAppUpdater } from "./updater";
+import { agentServer } from "./agent-server";
 
 const isDev = !app.isPackaged;
 const shouldOpenDevTools = process.env.BENCHLOCAL_OPEN_DEVTOOLS === "1";
@@ -117,6 +118,7 @@ function requestAppQuit(): void {
       await stopActiveBenchPackRunsForShutdown({
         timeoutMs: GRACEFUL_SHUTDOWN_TIMEOUT_MS
       });
+      await agentServer.stop();
     } catch (error) {
       console.error("[benchlocal] failed to stop active Bench Pack runs during shutdown", error);
     } finally {
@@ -370,6 +372,7 @@ app.whenReady().then(async () => {
     ...(appMetadata.copyright ? { copyright: appMetadata.copyright } : {})
   });
   registerIpcHandlers();
+  await agentServer.initialize();
   initializeAppUpdater();
   buildApplicationMenu(appMetadata.productName);
   await createMainWindow();

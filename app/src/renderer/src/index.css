@@ -3249,6 +3249,18 @@ select.config-input {
   gap: 16px;
 }
 
+.agent-access-status-row,
+.agent-endpoint-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.agent-endpoint-list {
+  align-items: flex-start;
+}
+
 .dialog-summary {
   margin-top: 14px;
   padding: 12px 14px;

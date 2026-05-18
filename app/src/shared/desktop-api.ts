@@ -1,5 +1,7 @@
 import type {
   BenchPackRegistryEntry,
+  BenchLocalAgentAccessState,
+  BenchLocalAgentSafeConfig,
   BenchLocalConfig,
   BenchLocalThemeDefinition,
   BenchLocalThemeDescriptor,
@@ -12,6 +14,8 @@ import type {
   BenchPackRunSummary,
   VerifierEndpoint
 } from "@core";
+
+export type { BenchLocalAgentAccessState } from "@core";
 
 export type DetachedLogsState = {
   workspaceName: string;
@@ -104,6 +108,13 @@ export interface BenchLocalDesktopApi {
   config: {
     load(): Promise<ConfigLoadResult>;
     save(config: BenchLocalConfig): Promise<ConfigLoadResult>;
+    onUpdated(listener: (payload: { config: BenchLocalAgentSafeConfig }) => void): () => void;
+  };
+  agent: {
+    state(): Promise<BenchLocalAgentAccessState>;
+    configure(input: { enabled: boolean; port?: number }): Promise<BenchLocalAgentAccessState>;
+    regenerateToken(): Promise<BenchLocalAgentAccessState>;
+    onState(listener: (state: BenchLocalAgentAccessState) => void): () => void;
   };
   models: {
     discover(input: { provider: BenchLocalConfig["providers"][string] }): Promise<BenchLocalDiscoveredModel[]>;
@@ -118,6 +129,7 @@ export interface BenchLocalDesktopApi {
     save(state: BenchLocalWorkspaceState): Promise<{ path: string; created: boolean; state: BenchLocalWorkspaceState }>;
     export(input: { workspaceId: string; state: BenchLocalWorkspaceState }): Promise<{ exported: boolean; filePath?: string }>;
     import(): Promise<{ imported: boolean; workspace?: BenchLocalWorkspaceState["workspaces"][string]; tabs?: BenchLocalWorkspaceState["tabs"] }>;
+    onUpdated(listener: (payload: { state: BenchLocalWorkspaceState }) => void): () => void;
   };
   benchPacks: {
     list(): Promise<BenchPackInspection[]>;
@@ -157,7 +169,7 @@ export interface BenchLocalDesktopApi {
     history(input: { benchPackId: string }): Promise<BenchPackRunHistoryEntry[]>;
     loadHistory(input: { benchPackId: string; runId: string }): Promise<BenchPackRunSummary>;
     clearHistory(input: { benchPackId: string }): Promise<{ removed: boolean }>;
-    onRunEvent(listener: (payload: { tabId: string; event: ProgressEvent }) => void): () => void;
+    onRunEvent(listener: (payload: { tabId: string; benchPackId?: string; event: ProgressEvent }) => void): () => void;
   };
   verifiers: {
     list(): Promise<BenchPackVerifierStatus[]>;

@@ -57,6 +57,9 @@ official_url = "https://raw.githubusercontent.com/stevibe/benchlocal-registry/ma
 
 [ui]
 theme = "system"
+
+[agent]
+enabled = false
 ```
 
 Fresh config starts intentionally blank:
@@ -66,6 +69,23 @@ Fresh config starts intentionally blank:
 - no installed Bench Packs
 
 BenchLocal does not seed providers or models automatically.
+
+## Agent Access
+
+Agent Access lives under:
+
+```toml
+[agent]
+enabled = false
+port = 41373
+```
+
+Fields:
+
+- `enabled` starts or stops the local agent control API
+- `port` is optional; omit it to let BenchLocal choose an available local port
+
+Agent Access always binds to `127.0.0.1` and uses a generated bearer token stored separately in `~/.benchlocal/agent-session.json`.
 
 ## Providers
 

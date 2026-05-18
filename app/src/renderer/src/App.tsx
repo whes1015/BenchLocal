@@ -56,6 +56,7 @@ import type {
 } from "@core";
 import type {
   BenchLocalAppMetadata,
+  BenchLocalAgentAccessState,
   BenchLocalUpdateState,
   BenchPackMutationProgress,
   BenchLocalDiscoveredModel,
@@ -132,7 +133,7 @@ function formatDurationMs(durationMs?: number): string | null {
   return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
 }
 
-type SettingsTab = "providers" | "models" | "benchPacks" | "verification" | "advanced";
+type SettingsTab = "providers" | "models" | "benchPacks" | "verification" | "agent" | "advanced";
 
 type LoadState = {
   path: string;
@@ -383,7 +384,8 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; blurb: string; icon
   { id: "providers", label: "Providers", blurb: "Provider endpoints and credentials.", icon: <Server size={16} /> },
   { id: "models", label: "Models", blurb: "Shared model registry across Bench Packs.", icon: <Bot size={16} /> },
   { id: "benchPacks", label: "Bench Packs", blurb: "Browse, install, update, and remove official Bench Packs.", icon: <PlugZap size={16} /> },
-  { id: "verification", label: "Verification", blurb: "Managed verifiers and dependency modes.", icon: <Wrench size={16} /> }
+  { id: "verification", label: "Verification", blurb: "Managed verifiers and dependency modes.", icon: <Wrench size={16} /> },
+  { id: "agent", label: "Agent Access", blurb: "Local API and live event stream for AI agents.", icon: <Server size={16} /> }
 ];
 
 const SAMPLING_FIELDS: Array<{
@@ -1420,6 +1422,7 @@ export function App() {
   const [aboutDialogOpen, setAboutDialogOpen] = useState(false);
   const [appMetadata, setAppMetadata] = useState<BenchLocalAppMetadata | null>(null);
   const [appUpdateState, setAppUpdateState] = useState<BenchLocalUpdateState | null>(null);
+  const [agentAccessState, setAgentAccessState] = useState<BenchLocalAgentAccessState | null>(null);
   const [dismissedDownloadedUpdateVersion, setDismissedDownloadedUpdateVersion] = useState<string | null>(null);
   const [providerModal, setProviderModal] = useState<ProviderModalState | null>(null);
   const [modelModal, setModelModal] = useState<ModelModalState | null>(null);
@@ -1458,6 +1461,7 @@ export function App() {
   const [benchPackMutations, setBenchPackMutations] = useState<Record<string, BenchPackMutationState>>({});
   const themeMenuRef = useRef<HTMLDivElement | null>(null);
   const settingsOpenRef = useRef(false);
+  const workspaceStateRef = useRef<BenchLocalWorkspaceState | null>(null);
 
   const providerIds = useMemo(() => Object.keys(draft?.providers ?? {}), [draft]);
   const themeOptions = useMemo(() => ["system", ...availableThemes.map((theme) => theme.id)], [availableThemes]);
@@ -1714,14 +1718,16 @@ export function App() {
           inspections,
           themes,
           verifierStatusList,
-          activeRunsResult
+          activeRunsResult,
+          agentState
         ] = await Promise.all([
           window.benchlocal.config.load(),
           window.benchlocal.workspaces.load(),
           window.benchlocal.benchPacks.list(),
           window.benchlocal.themes.list(),
           window.benchlocal.verifiers.list(),
-          window.benchlocal.benchPacks.activeRuns()
+          window.benchlocal.benchPacks.activeRuns(),
+          window.benchlocal.agent.state()
         ]);
 
         let registry: BenchPackRegistryEntry[] = [];
@@ -1781,6 +1787,7 @@ export function App() {
         setRegistryEntries(registry);
         setRegistryWarning(nextRegistryWarning);
         setAvailableThemes(themes);
+        setAgentAccessState(agentState);
         setVerifierStatuses(Object.fromEntries(verifierStatusList.map((status) => [status.benchPackId, status])));
         setActiveRuns(
           Object.fromEntries(activeRunsResult.map((run) => [run.tabId, { benchPackId: run.benchPackId }]))
@@ -1918,6 +1925,25 @@ export function App() {
         });
       }
 
+      if (event.type === "run_started") {
+        setActiveRuns((current) => {
+          if (current[tabId]) {
+            return current;
+          }
+
+          const tabBenchPackId = workspaceStateRef.current?.tabs[tabId]?.benchPackId;
+
+          if (!tabBenchPackId) {
+            return current;
+          }
+
+          return {
+            ...current,
+            [tabId]: { benchPackId: tabBenchPackId, mode: "host" }
+          };
+        });
+      }
+
       setLiveRuns((current) => ({
         ...current,
         [tabId]: updateLiveRunState(current[tabId], event)
@@ -1948,6 +1974,87 @@ export function App() {
           };
         });
       }
+    });
+  }, []);
+
+  useEffect(() => {
+    workspaceStateRef.current = workspaceState;
+  }, [workspaceState]);
+
+  useEffect(() => {
+    const loadUpdatedConfig = async () => {
+      try {
+        const result = await window.benchlocal.config.load();
+        setLoadState(result);
+        setDraft(cloneConfig(result.config));
+        await loadBenchPackInspections();
+        await loadRegistryEntries();
+      } catch (configError) {
+        setError(configError instanceof Error ? configError.message : "Failed to reload BenchLocal config.");
+      }
+    };
+
+    return window.benchlocal.config.onUpdated(() => {
+      void loadUpdatedConfig();
+    });
+  }, []);
+
+  useEffect(() => {
+    const loadUpdatedWorkspace = async (state: BenchLocalWorkspaceState) => {
+      setWorkspaceState(state);
+      const persistedRunEntries = await Promise.all(
+        Object.values(state.tabs)
+          .filter((tab) => tab.benchPackId && tab.loadedRunId)
+          .map(async (tab) => {
+            try {
+              const summary = await window.benchlocal.benchPacks.loadHistory({
+                benchPackId: tab.benchPackId as string,
+                runId: tab.loadedRunId as string
+              });
+              return [tab.id, summary] as const;
+            } catch {
+              return null;
+            }
+          })
+      );
+
+      setRunSummaries((current) => ({
+        ...current,
+        ...Object.fromEntries(
+          persistedRunEntries.filter(
+            (entry): entry is readonly [string, BenchPackRunSummary] => entry !== null
+          )
+        )
+      }));
+      setLoadedHistoryRuns((current) => ({
+        ...current,
+        ...Object.fromEntries(
+          persistedRunEntries
+            .filter((entry): entry is readonly [string, BenchPackRunSummary] => entry !== null)
+            .map(([tabId, summary]) => [
+              tabId,
+              {
+                runId: summary.runId,
+                startedAt: summary.startedAt,
+                mode: "history" as const
+              }
+            ])
+        )
+      }));
+    };
+
+    return window.benchlocal.workspaces.onUpdated(({ state }) => {
+      void loadUpdatedWorkspace(state);
+    });
+  }, []);
+
+  useEffect(() => {
+    void window.benchlocal.agent.state().then(setAgentAccessState).catch(() => undefined);
+
+    return window.benchlocal.agent.onState((state) => {
+      void window.benchlocal.agent.state().then(setAgentAccessState).catch(() => {
+        setAgentAccessState(state);
+      });
     });
   }, []);
 
@@ -2255,6 +2362,30 @@ export function App() {
     }
 
     return persistConfig(draft, { notice: "Saved ~/.benchlocal/config.toml" });
+  };
+
+  const configureAgentAccess = async (input: { enabled: boolean; port?: number }): Promise<void> => {
+    setError(null);
+
+    try {
+      const state = await window.benchlocal.agent.configure(input);
+      setAgentAccessState(state);
+      setSettingsNotice(state.enabled ? "Enabled local Agent Access." : "Disabled local Agent Access.");
+    } catch (agentError) {
+      setError(agentError instanceof Error ? agentError.message : "Failed to update Agent Access.");
+    }
+  };
+
+  const regenerateAgentToken = async (): Promise<void> => {
+    setError(null);
+
+    try {
+      const state = await window.benchlocal.agent.regenerateToken();
+      setAgentAccessState(state);
+      setSettingsNotice("Regenerated the Agent Access token.");
+    } catch (agentError) {
+      setError(agentError instanceof Error ? agentError.message : "Failed to regenerate Agent Access token.");
+    }
   };
 
   const refreshBenchPackState = async (result?: LoadState) => {
@@ -4311,6 +4442,9 @@ export function App() {
 
               {!settingsOpen ? (
                 <div className="toolbar-cluster">
+                  {agentAccessState?.running ? (
+                    <span className="status-chip status-ready">Agent API</span>
+                  ) : null}
                   <BenchPackPickerTrigger
                     inspections={readyInspections}
                     open={tabMenuOpen}
@@ -4403,6 +4537,7 @@ export function App() {
               registryWarning={registryWarning}
               benchPackMutations={benchPackMutations}
               verifierStatuses={verifierStatuses}
+              agentAccessState={agentAccessState}
               onBack={() => {
                 setSettingsNotice(null);
                 setSettingsOpen(false);
@@ -4513,6 +4648,8 @@ export function App() {
               onInstallBenchPackFromUrl={(url) => installBenchPackFromUrl(url)}
               onUpdateBenchPack={(benchPackId) => void updateBenchPack(benchPackId)}
               onUninstallBenchPack={(benchPackId) => void uninstallInstalledBenchPack(benchPackId)}
+              onConfigureAgentAccess={(input) => void configureAgentAccess(input)}
+              onRegenerateAgentToken={() => void regenerateAgentToken()}
               updateDraft={updateDraft}
               onUpdateVerifier={(benchPackId, verifierId, updater) => {
                 void saveVerifierConfig(benchPackId, verifierId, updater);
@@ -7348,6 +7485,7 @@ function SettingsScene({
   registryWarning,
   benchPackMutations,
   verifierStatuses,
+  agentAccessState,
   onBack,
   onDismissNotice,
   onDismissError,
@@ -7367,6 +7505,8 @@ function SettingsScene({
   onInstallBenchPackFromUrl,
   onUpdateBenchPack,
   onUninstallBenchPack,
+  onConfigureAgentAccess,
+  onRegenerateAgentToken,
   updateDraft,
   onUpdateVerifier
 }: {
@@ -7384,6 +7524,7 @@ function SettingsScene({
   registryWarning: string | null;
   benchPackMutations: Record<string, BenchPackMutationState>;
   verifierStatuses: Record<string, BenchPackVerifierStatus>;
+  agentAccessState: BenchLocalAgentAccessState | null;
   onBack: () => void;
   onDismissNotice: () => void;
   onDismissError: () => void;
@@ -7403,6 +7544,8 @@ function SettingsScene({
   onInstallBenchPackFromUrl: (url: string) => Promise<boolean | void>;
   onUpdateBenchPack: (benchPackId: string) => void;
   onUninstallBenchPack: (benchPackId: string) => void;
+  onConfigureAgentAccess: (input: { enabled: boolean; port?: number }) => void;
+  onRegenerateAgentToken: () => void;
   updateDraft: (updater: (current: BenchLocalConfig) => BenchLocalConfig) => void;
   onUpdateVerifier: (
     benchPackId: string,
@@ -7522,6 +7665,14 @@ function SettingsScene({
                 onDeleteImage={(benchPackId, benchPackName, verifierId) => {
                   onDeleteVerifierImage(benchPackId, benchPackName, verifierId);
                 }}
+              />
+            ) : null}
+
+            {settingsTab === "agent" ? (
+              <AgentAccessView
+                state={agentAccessState}
+                onConfigure={onConfigureAgentAccess}
+                onRegenerateToken={onRegenerateAgentToken}
               />
             ) : null}
 
@@ -8249,6 +8400,116 @@ function VerificationView({
         </table>
       </SettingsTableShell>
     </Panel>
+  );
+}
+
+function AgentAccessView({
+  state,
+  onConfigure,
+  onRegenerateToken
+}: {
+  state: BenchLocalAgentAccessState | null;
+  onConfigure: (input: { enabled: boolean; port?: number }) => void;
+  onRegenerateToken: () => void;
+}) {
+  const [enabledDraft, setEnabledDraft] = useState(state?.enabled ?? false);
+  const [portDraft, setPortDraft] = useState(state?.configuredPort ? String(state.configuredPort) : "");
+
+  useEffect(() => {
+    setEnabledDraft(state?.enabled ?? false);
+    setPortDraft(state?.configuredPort ? String(state.configuredPort) : "");
+  }, [state?.enabled, state?.configuredPort]);
+
+  const apply = () => {
+    const normalizedPort = portDraft.trim() ? Number(portDraft.trim()) : undefined;
+    onConfigure({
+      enabled: enabledDraft,
+      ...(Number.isFinite(normalizedPort) && normalizedPort ? { port: normalizedPort } : {})
+    });
+  };
+
+  const copyText = (value?: string) => {
+    if (!value || typeof navigator === "undefined") {
+      return;
+    }
+
+    void navigator.clipboard?.writeText(value);
+  };
+  const agentGuideUrl = state?.baseUrl ? `${state.baseUrl}/v1/agent-guide` : "";
+  const openApiUrl = state?.baseUrl ? `${state.baseUrl}/v1/openapi.json` : "";
+
+  return (
+    <section className="advanced-grid">
+      <Panel title="Agent Access" subtitle="Local API and event stream for AI agents." tone="sky" icon={<Server size={16} />}>
+        <div className="agent-access-status-row">
+          <span className={`status-chip ${state?.running ? "status-ready" : "status-inactive"}`}>
+            {state?.running ? "running" : state?.enabled ? "stopped" : "disabled"}
+          </span>
+          {state?.baseUrl ? <span className="settings-row-secondary settings-mono-cell">{state.baseUrl}</span> : null}
+          {state ? <span className="status-chip status-idle">{state.connectedClients} clients</span> : null}
+        </div>
+
+        <div className="entry-grid two-col">
+          <FieldToggle label="Local Agent API" checked={enabledDraft} onChange={setEnabledDraft} />
+          <Field
+            label="Port"
+            value={portDraft}
+            placeholder="Auto"
+            type="number"
+            onChange={setPortDraft}
+          />
+        </div>
+
+        <Field label="Bearer Token" value={state?.token ?? ""} readOnly onChange={() => undefined} />
+        <div className="entry-grid two-col">
+          <Field label="Agent Guide URL" value={agentGuideUrl} readOnly onChange={() => undefined} />
+          <Field label="OpenAPI URL" value={openApiUrl} readOnly onChange={() => undefined} />
+        </div>
+
+        {state?.message ? (
+          <div className="helper-copy helper-copy-compact">
+            <p>{state.message}</p>
+          </div>
+        ) : null}
+
+        <div className="settings-actions">
+          <button type="button" className="ghost-button" onClick={() => copyText(state?.token)} disabled={!state?.token}>
+            <Copy size={14} />
+            Copy Token
+          </button>
+          <button type="button" className="ghost-button" onClick={() => copyText(agentGuideUrl)} disabled={!agentGuideUrl}>
+            <Copy size={14} />
+            Copy Guide URL
+          </button>
+          <button type="button" className="ghost-button" onClick={onRegenerateToken}>
+            <RotateCcw size={14} />
+            Regenerate Token
+          </button>
+          <button type="button" className="primary-button" onClick={apply}>
+            <Save size={14} />
+            Apply
+          </button>
+        </div>
+      </Panel>
+
+      <Panel title="HTTP Surface" subtitle="Command endpoints use JSON; live progress uses Server-Sent Events." tone="slate" icon={<Logs size={16} />}>
+        <div className="agent-endpoint-list">
+          <div className="settings-row-secondary settings-mono-cell">GET /v1/health</div>
+          <div className="settings-row-secondary settings-mono-cell">GET /v1/agent-guide</div>
+          <div className="settings-row-secondary settings-mono-cell">GET /v1/openapi.json</div>
+          <div className="settings-row-secondary settings-mono-cell">GET /v1/events</div>
+          <div className="settings-row-secondary settings-mono-cell">GET /v1/benchpacks</div>
+          <div className="settings-row-secondary settings-mono-cell">GET/POST/PATCH/DELETE /v1/providers</div>
+          <div className="settings-row-secondary settings-mono-cell">GET/POST/PATCH/DELETE /v1/models</div>
+          <div className="settings-row-secondary settings-mono-cell">POST /v1/tabs/:tabId/models/availability/refresh</div>
+          <div className="settings-row-secondary settings-mono-cell">POST /v1/tabs/:tabId/sampling</div>
+          <div className="settings-row-secondary settings-mono-cell">POST /v1/tabs/:tabId/execution-mode</div>
+          <div className="settings-row-secondary settings-mono-cell">POST /v1/tabs/:tabId/runs</div>
+          <div className="settings-row-secondary settings-mono-cell">POST /v1/tabs/:tabId/runs/:runId/resume</div>
+          <div className="settings-row-secondary settings-mono-cell">POST /v1/tabs/:tabId/runs/:runId/retry-*</div>
+        </div>
+      </Panel>
+    </section>
   );
 }
 
