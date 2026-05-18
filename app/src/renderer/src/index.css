@@ -2520,6 +2520,10 @@ pre {
   gap: 14px;
 }
 
+.advanced-grid {
+  align-items: start;
+}
+
 .settings-grid,
 .advanced-grid,
 .entry-grid.two-col {
@@ -3257,8 +3261,111 @@ select.config-input {
   gap: 10px;
 }
 
-.agent-endpoint-list {
+.agent-experimental-message {
+  display: flex;
   align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--partial) 30%, var(--border));
+  background: color-mix(in srgb, var(--partial-soft) 62%, transparent);
+  color: var(--ink);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.agent-experimental-message svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--partial);
+}
+
+.agent-experimental-message strong {
+  font-weight: 750;
+}
+
+.agent-field-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.agent-field-row-token {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.agent-field-row .field-block {
+  min-width: 0;
+}
+
+.agent-field-row .ghost-button {
+  min-width: 86px;
+  margin-bottom: 0;
+}
+
+.agent-field-row .ghost-button + .ghost-button {
+  min-width: 118px;
+}
+
+.agent-endpoint-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.agent-endpoint-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-strong);
+  box-shadow: inset 0 1px 0 var(--glass-border);
+}
+
+.agent-endpoint-method,
+.agent-endpoint-path {
+  font-family: var(--font-mono);
+}
+
+.agent-endpoint-method {
+  justify-self: start;
+  min-width: 58px;
+  border-radius: 999px;
+  padding: 0.22rem 0.46rem;
+  text-align: center;
+  font-size: 0.68rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.agent-endpoint-method.method-post {
+  color: var(--pass);
+  background: var(--pass-soft);
+}
+
+.agent-endpoint-method.method-patch {
+  color: var(--partial);
+  background: var(--partial-soft);
+}
+
+.agent-endpoint-method.method-delete {
+  color: var(--fail);
+  background: var(--fail-soft);
+}
+
+.agent-endpoint-path {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
 }
 
 .dialog-summary {
@@ -3580,6 +3687,15 @@ select.config-input {
   .section-actions,
   .settings-actions,
   .modal-actions {
+    width: 100%;
+  }
+
+  .agent-field-row,
+  .agent-field-row-token {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-field-row .ghost-button {
     width: 100%;
   }
 

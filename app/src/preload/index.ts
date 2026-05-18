@@ -72,7 +72,8 @@ const api: BenchLocalDesktopApi = {
   },
   agent: {
     state: () => ipcRenderer.invoke(AGENT_GET_STATE_CHANNEL),
-    configure: (input: { enabled: boolean; port?: number }) => ipcRenderer.invoke(AGENT_CONFIGURE_CHANNEL, input),
+    configure: (input: { enabled: boolean; access?: "localhost" | "local_network"; port?: number }) =>
+      ipcRenderer.invoke(AGENT_CONFIGURE_CHANNEL, input),
     regenerateToken: () => ipcRenderer.invoke(AGENT_REGENERATE_TOKEN_CHANNEL),
     onState: (listener) => {
       const wrapped = (_event: Electron.IpcRendererEvent, state: Parameters<typeof listener>[0]) => {

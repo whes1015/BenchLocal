@@ -61,8 +61,11 @@ export type BenchLocalRegistryConfig = {
   official_url: string;
 };
 
+export type BenchLocalAgentAccess = "localhost" | "local_network";
+
 export type BenchLocalAgentConfig = {
   enabled: boolean;
+  access: BenchLocalAgentAccess;
   port?: number;
 };
 
@@ -177,10 +180,12 @@ const ConfigSchema = z.object({
   agent: z
     .object({
       enabled: z.boolean().default(false),
+      access: z.enum(["localhost", "local_network"]).default("localhost"),
       port: z.number().int().min(0).max(65535).optional()
     })
     .default({
-      enabled: false
+      enabled: false,
+      access: "localhost"
     }),
   providers: z.record(z.string(), ProviderSchema).default({}),
   models: z.array(ModelSchema).default([]),
@@ -277,7 +282,8 @@ export function createDefaultConfig(): BenchLocalConfig {
       theme: "system"
     },
     agent: {
-      enabled: false
+      enabled: false,
+      access: "localhost"
     },
     providers: {},
     models: [],
@@ -356,8 +362,9 @@ function normalizeConfig(raw: unknown): BenchLocalConfig {
       ...parsed.ui
     },
     agent: {
-      ...(defaults.agent ?? { enabled: false }),
+      ...(defaults.agent ?? { enabled: false, access: "localhost" }),
       ...(parsed.agent ?? {}),
+      access: parsed.agent.access ?? defaults.agent?.access ?? "localhost",
       port: parsed.agent.port === 0 ? undefined : parsed.agent.port
     },
     providers: normalizedProviders,

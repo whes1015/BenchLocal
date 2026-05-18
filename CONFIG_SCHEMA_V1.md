@@ -60,6 +60,7 @@ theme = "system"
 
 [agent]
 enabled = false
+access = "localhost"
 ```
 
 Fresh config starts intentionally blank:
@@ -77,15 +78,17 @@ Agent Access lives under:
 ```toml
 [agent]
 enabled = false
+access = "localhost"
 port = 41373
 ```
 
 Fields:
 
 - `enabled` starts or stops the local agent control API
+- `access` controls the bind scope: `localhost` binds to `127.0.0.1`; `local_network` binds to `0.0.0.0`
 - `port` is optional; omit it to let BenchLocal choose an available local port
 
-Agent Access always binds to `127.0.0.1` and uses a generated bearer token stored separately in `~/.benchlocal/agent-session.json`.
+Agent Access uses a generated bearer token stored separately in `~/.benchlocal/agent-session.json`. Keep `access = "localhost"` unless agents on other devices need to connect over your local network.
 
 ## Providers
 

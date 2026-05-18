@@ -1,5 +1,6 @@
 import type {
   BenchLocalConfig,
+  BenchLocalAgentAccess,
   BenchLocalModelConfig,
   BenchLocalProviderKind
 } from "./config.js";
@@ -35,7 +36,8 @@ export type BenchLocalAgentEvent<TPayload = unknown> = {
 export type BenchLocalAgentAccessState = {
   enabled: boolean;
   running: boolean;
-  host: "127.0.0.1";
+  access: BenchLocalAgentAccess;
+  host: "127.0.0.1" | "0.0.0.0";
   configuredPort?: number;
   port?: number;
   baseUrl?: string;

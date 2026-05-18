@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
 import type {
+  BenchLocalAgentAccess,
   BenchLocalAgentAccessState,
   BenchLocalAgentCreateModelRequest,
   BenchLocalAgentCreateProviderRequest,
@@ -32,12 +33,13 @@ type AgentSession = {
 
 type ConfigureAgentAccessInput = {
   enabled: boolean;
+  access?: BenchLocalAgentAccess;
   port?: number;
 };
 
 type RetryBatchKind = "provider_errors" | "failed_results";
 
-const AGENT_HOST = "127.0.0.1" as const;
+const DEFAULT_AGENT_ACCESS = "localhost" as const;
 const AGENT_SESSION_PATH = path.join(getBenchLocalHome(), "agent-session.json");
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
 
@@ -74,6 +76,26 @@ function normalizePort(value: unknown): number | undefined {
   }
 
   return port === 0 ? undefined : port;
+}
+
+function normalizeAccess(value: unknown): BenchLocalAgentAccess | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+
+  if (value === "localhost" || value === "local_network") {
+    return value;
+  }
+
+  throw new HttpError(400, "Access must be either localhost or local_network.");
+}
+
+function getAgentHost(access: BenchLocalAgentAccess): "127.0.0.1" | "0.0.0.0" {
+  return access === "local_network" ? "0.0.0.0" : "127.0.0.1";
+}
+
+function getAgentLocalClientHost(): "127.0.0.1" {
+  return "127.0.0.1";
 }
 
 function normalizeString(value: unknown, field: string): string {
@@ -156,6 +178,7 @@ class BenchLocalAgentServer {
   private session: AgentSession | null = null;
   private connectedClients = new Set<ServerResponse>();
   private enabled = false;
+  private access: BenchLocalAgentAccess = DEFAULT_AGENT_ACCESS;
   private configuredPort: number | undefined;
   private port: number | undefined;
   private message: string | undefined;
@@ -171,7 +194,9 @@ class BenchLocalAgentServer {
     const { config } = await loadOrCreateConfig();
     const envEnabled = process.env.BENCHLOCAL_AGENT_API === "1";
     const envPort = normalizePort(process.env.BENCHLOCAL_AGENT_PORT);
+    const envAccess = normalizeAccess(process.env.BENCHLOCAL_AGENT_ACCESS);
     this.enabled = envEnabled || config.agent?.enabled === true;
+    this.access = envAccess ?? config.agent?.access ?? DEFAULT_AGENT_ACCESS;
     this.configuredPort = envPort ?? config.agent?.port;
 
     if (this.enabled) {
@@ -189,10 +214,11 @@ class BenchLocalAgentServer {
     return {
       enabled: this.enabled,
       running: Boolean(this.server),
-      host: AGENT_HOST,
+      access: this.access,
+      host: getAgentHost(this.access),
       configuredPort: this.configuredPort,
       port: this.port,
-      baseUrl: this.port ? `http://${AGENT_HOST}:${this.port}` : undefined,
+      baseUrl: this.port ? `http://${getAgentLocalClientHost()}:${this.port}` : undefined,
       token,
       connectedClients: this.connectedClients.size,
       message: this.message,
@@ -202,6 +228,7 @@ class BenchLocalAgentServer {
 
   async configure(input: ConfigureAgentAccessInput): Promise<BenchLocalAgentAccessState> {
     this.enabled = input.enabled;
+    this.access = input.access ?? this.access ?? DEFAULT_AGENT_ACCESS;
     this.configuredPort = input.port;
 
     const { config } = await loadOrCreateConfig();
@@ -209,6 +236,7 @@ class BenchLocalAgentServer {
       ...config,
       agent: {
         enabled: input.enabled,
+        access: this.access,
         ...(input.port ? { port: input.port } : {})
       }
     });
@@ -280,10 +308,11 @@ class BenchLocalAgentServer {
     });
 
     const requestedPort = this.configuredPort ?? 0;
+    const host = getAgentHost(this.access);
 
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
-      server.listen(requestedPort, AGENT_HOST, () => {
+      server.listen(requestedPort, host, () => {
         server.off("error", reject);
         resolve();
       });
@@ -299,7 +328,7 @@ class BenchLocalAgentServer {
     this.server = server;
     this.port = address.port;
     this.startedAt = new Date().toISOString();
-    this.message = `Agent API is listening on http://${AGENT_HOST}:${this.port}.`;
+    this.message = `Agent API is listening on http://${host}:${this.port}.`;
     this.emitState();
   }
 
@@ -343,7 +372,7 @@ class BenchLocalAgentServer {
   }
 
   private async handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const url = new URL(request.url ?? "/", `http://${AGENT_HOST}`);
+    const url = new URL(request.url ?? "/", `http://${getAgentHost(this.access)}`);
     const segments = decodePathSegments(url.pathname);
 
     if (request.method === "GET" && url.pathname === "/v1/health") {
@@ -426,7 +455,8 @@ class BenchLocalAgentServer {
   }
 
   private createAgentGuide(): string {
-    const baseUrl = this.port ? `http://${AGENT_HOST}:${this.port}` : `http://${AGENT_HOST}:<port>`;
+    const host = getAgentLocalClientHost();
+    const baseUrl = this.port ? `http://${host}:${this.port}` : `http://${host}:<port>`;
 
     return `# BenchLocal Agent API
 
@@ -442,6 +472,7 @@ Authorization: Bearer <token>
 
 The token is shown in BenchLocal Settings > Agent Access. All endpoints except \`GET /v1/health\` require this bearer token.
 Provider, model, Bench Pack, tab, and run IDs used in path segments must be URL-encoded. This matters for model IDs such as \`provider:Qwen/Qwen3.5-9B\`.
+When Agent Access is set to Local Network, BenchLocal listens on \`0.0.0.0\`; agents on other devices should use this machine's LAN IP address with the same port and bearer token.
 
 ## Recommended Agent Workflow
 
@@ -586,7 +617,8 @@ Refresh selected models:
   }
 
   private createOpenApiDocument() {
-    const serverUrl = this.port ? `http://${AGENT_HOST}:${this.port}` : `http://${AGENT_HOST}`;
+    const host = getAgentLocalClientHost();
+    const serverUrl = this.port ? `http://${host}:${this.port}` : `http://${host}`;
     const bearerSecurity = [{ bearerAuth: [] }];
     const jsonContent = (schema: Record<string, unknown>) => ({
       "application/json": {

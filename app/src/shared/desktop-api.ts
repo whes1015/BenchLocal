@@ -112,7 +112,7 @@ export interface BenchLocalDesktopApi {
   };
   agent: {
     state(): Promise<BenchLocalAgentAccessState>;
-    configure(input: { enabled: boolean; port?: number }): Promise<BenchLocalAgentAccessState>;
+    configure(input: { enabled: boolean; access?: "localhost" | "local_network"; port?: number }): Promise<BenchLocalAgentAccessState>;
     regenerateToken(): Promise<BenchLocalAgentAccessState>;
     onState(listener: (state: BenchLocalAgentAccessState) => void): () => void;
   };
