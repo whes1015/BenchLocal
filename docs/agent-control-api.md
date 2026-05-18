@@ -1,148 +1,212 @@
-# Agent Control API Plan
+# Agent API and MCP Developer Reference
 
-## Goal
+This document is the durable reference for BenchLocal's local agent surface:
 
-BenchLocal should let a local AI agent inspect and control benchmark workflows while the desktop UI stays live and visible.
+- HTTP JSON commands for state reads and mutations
+- Server-Sent Events for live progress and state changes
+- MCP Streamable HTTP for standard agent tool calls
 
-The first version should support agents that can:
+Keep this file updated whenever a UI feature becomes agent-controllable.
 
-- inspect installed Bench Packs, providers, models, model availability, workspaces, tabs, and run history
-- create, update, duplicate, and delete provider/model records
-- create or update tabs
-- pick a Bench Pack and model set
-- refresh model availability
-- start, resume, retry, and stop benchmark runs
-- update sampling, run mode, and runs-per-test controls
-- subscribe to real-time run progress
+## Design Contract
 
-The feature should not turn BenchLocal into a general remote automation daemon. It should be local-first, explicit, and small enough to maintain.
+BenchLocal is a desktop benchmark app first. The agent surface must expose the same operations the UI exposes without creating a second execution path.
 
-## Recommendation
+Core rules:
 
-Use a local HTTP control API for commands and Server-Sent Events for live updates. Also expose a standard MCP Streamable HTTP endpoint on the same local server so MCP-capable agents can discover BenchLocal resources and call BenchLocal tools directly.
+- The Electron renderer keeps using IPC through `window.benchlocal`.
+- The Agent API and MCP call the same main-process controller as IPC.
+- Commands use HTTP JSON or MCP tools.
+- Live progress uses SSE events or MCP recent-event polling.
+- Long-running benchmark commands return quickly and continue in the UI.
+- Provider secrets are never returned by HTTP, SSE, MCP resources, or MCP tool results.
+- Agent access is explicit, token-protected, and local-first.
+- BenchLocal does not execute arbitrary shell commands for agents.
 
-Do not use SSE as the full API. SSE is one-way and works well for progress streams, but commands should be normal HTTP requests with request IDs, response codes, and typed JSON responses.
-
-Add a CLI as a thin wrapper around the same local HTTP API after the API exists. The CLI should not become a second runtime or duplicate Bench Pack execution logic.
-
-## Why this fits BenchLocal
-
-BenchLocal already has most of the needed primitives in the Electron main process:
-
-- config load/save
-- workspace load/save
-- Bench Pack list, registry, install, update, uninstall
-- model discovery and model availability
-- active runs
-- run, resume, retry, stop
-- run history and history loading
-- verifier lifecycle
-- live run events
-
-The problem is that this surface is currently exposed only through Electron IPC to the renderer. The right move is to extract a shared controller layer that can be called by both:
-
-- Electron IPC handlers
-- the local agent HTTP server
-
-That avoids adding a second path for benchmark execution.
-
-## Proposed Architecture
+Implementation files:
 
 ```text
-app/src/main/
-  controller.ts
-    Typed BenchLocal operations.
-    Owns config/workspace/run calls.
-    Does not know about Electron IPC or HTTP.
+app/src/main/controller.ts
+  Shared main-process operations used by IPC, HTTP, and MCP.
 
-  ipc.ts
-    Thin adapter from renderer IPC to controller methods.
+app/src/main/agent-server.ts
+  Local HTTP server, auth, SSE, OpenAPI, agent guide, and route adapters.
 
-  agent-server.ts
-    Local HTTP + SSE adapter to controller methods.
-    Hosts /mcp as an MCP Streamable HTTP adapter over the same controller.
+app/src/main/agent-mcp.ts
+  MCP Streamable HTTP server, resources, prompt, and benchlocal_* tools.
 
-  agent-mcp.ts
-    MCP resources, prompts, and benchlocal_* tools backed by controller methods.
+packages/benchlocal-core/src/agent-protocol.ts
+  Shared Agent API event and request/response types.
 
-packages/benchlocal-core/
-  agent-protocol.ts
-    Shared request/response/event types.
+packages/benchlocal-core/src/config.ts
+  Provider, model, and Agent Access config types.
+
+packages/benchlocal-core/src/workspaces.ts
+  Workspace, tab, model selection, execution mode, and sampling state.
 ```
 
-The renderer should keep using `window.benchlocal`, but the IPC implementation should call the shared controller. The agent server should call the same controller.
+## Runtime Model
 
-Real-time UI should work by broadcasting state and run events from one event bus:
+Agent Access can be enabled from Settings > Agent Access.
+
+The server listens on:
+
+- `127.0.0.1` when access is `localhost`
+- `0.0.0.0` when access is `local_network`
+
+The UI always shows a local client URL like:
 
 ```text
-Bench Pack host emits ProgressEvent
-  -> controller event bus
-    -> Electron renderer IPC
-    -> agent SSE clients
+http://127.0.0.1:<port>
 ```
 
-## Transport
+Agents on another device must use the host machine's LAN IP when `local_network` is enabled.
 
-Bind to localhost only.
+The port is either:
 
-Default state:
+- the configured port
+- an automatically assigned port when no port is configured
 
-- disabled unless the user enables it in Settings or starts BenchLocal with an explicit environment flag
-- random port by default
-- session token required
-- show active API status in the UI when enabled
+Environment overrides:
 
-Suggested local server defaults:
+```bash
+BENCHLOCAL_AGENT_API=1
+BENCHLOCAL_AGENT_PORT=50060
+BENCHLOCAL_AGENT_ACCESS=localhost
+BENCHLOCAL_AGENT_ACCESS=local_network
+```
+
+Token storage:
 
 ```text
-Access: localhost
-Host: 127.0.0.1, or 0.0.0.0 when Local Network is selected
-Port: dynamic unless configured
-Auth: Bearer token
-Token storage: ~/.benchlocal/agent-session.json
+~/.benchlocal/agent-session.json
 ```
 
-The token should be generated by BenchLocal and shown/copyable from Settings. Do not require users to put long-lived secrets in the config by default. Local Network access should be used only on trusted networks.
+The session file contains the bearer token and is written with owner-only permissions when created by BenchLocal.
 
-IDs used in path segments should be URL-encoded. This matters for model IDs that contain `:` or `/`.
+## Authentication
 
-## API Shape
-
-### Health
+All endpoints except `GET /v1/health` require:
 
 ```http
-GET /v1/health
-```
-
-Returns product/version/runtime information and whether the desktop UI is connected.
-
-### Events
-
-```http
-GET /v1/events
 Authorization: Bearer <token>
-Accept: text/event-stream
 ```
 
-Event types should include:
+The token is shown in Settings > Agent Access and can be regenerated there.
 
-- `workspace.updated`
-- `config.updated`
-- `models.availability.updated`
-- `benchpack.run.started`
-- `benchpack.run.event`
-- `benchpack.run.finished`
-- `benchpack.run.error`
-- `verifier.event`
+Unauthorized requests return:
 
-Each event should include:
+```json
+{
+  "error": {
+    "message": "Unauthorized.",
+    "statusCode": 401
+  }
+}
+```
 
-- `eventId`
-- `createdAt`
-- `type`
-- `payload`
+MCP requests also enforce an Origin guard. If an `Origin` header is present, it must be localhost:
+
+- `localhost`
+- `127.0.0.1`
+- `::1`
+- `[::1]`
+
+This is intentionally stricter than normal HTTP routes because MCP clients may be browser-adjacent.
+
+## URL and JSON Rules
+
+Path IDs must be URL-encoded. This is required for model IDs and provider IDs that contain `:`, `/`, spaces, or UUID-like provider prefixes.
 
 Example:
+
+```bash
+MODEL_ID='huggingface:Qwen/Qwen3.5-9B'
+curl "$BENCHLOCAL_AGENT_BASE_URL/v1/models/$(node -e 'console.log(encodeURIComponent(process.argv[1]))' "$MODEL_ID")" \
+  -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN"
+```
+
+JSON write endpoints reject unknown fields. This is deliberate:
+
+- agents get fast feedback when they drift from the contract
+- accidental writes do not silently mutate future config
+- UI and API payloads stay aligned
+
+Request bodies are limited to 1 MB.
+
+Errors use:
+
+```json
+{
+  "error": {
+    "message": "Human-readable error.",
+    "statusCode": 400
+  }
+}
+```
+
+## Discovery Endpoints
+
+### `GET /v1/health`
+
+No auth required.
+
+Returns runtime status and documentation links.
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "benchLocalVersion": "0.2.6",
+  "agent": {
+    "enabled": true,
+    "running": true,
+    "access": "localhost",
+    "host": "127.0.0.1",
+    "port": 50060,
+    "baseUrl": "http://127.0.0.1:50060",
+    "connectedClients": 0,
+    "message": "Agent API is listening on http://127.0.0.1:50060.",
+    "startedAt": "2026-05-18T00:00:00.000Z"
+  },
+  "docs": {
+    "agentGuide": "/v1/agent-guide",
+    "openapi": "/v1/openapi.json",
+    "mcp": "/mcp"
+  }
+}
+```
+
+### `GET /v1/agent-guide`
+
+Auth required.
+
+Returns agent-readable Markdown generated by the running app. This is intentionally shorter than this developer reference and is meant for runtime agent bootstrapping.
+
+### `GET /v1/openapi.json`
+
+Auth required.
+
+Returns the OpenAPI document generated by the running app.
+
+The OpenAPI document is useful for endpoint discovery, but the schemas are intentionally lightweight today. This doc remains the source of implementation guidance.
+
+### `POST /mcp`
+
+Auth required.
+
+Standard MCP Streamable HTTP endpoint. See [MCP Surface](#mcp-surface).
+
+`POST /v1/mcp` is also accepted.
+
+## SSE Event Stream
+
+### `GET /v1/events`
+
+Auth required.
+
+Opens a Server-Sent Events stream.
 
 ```bash
 curl -N \
@@ -150,116 +214,916 @@ curl -N \
   "$BENCHLOCAL_AGENT_BASE_URL/v1/events"
 ```
 
-### State Reads
+Initial response includes a comment:
 
-```http
-GET /v1/config
-GET /v1/workspaces
-GET /v1/benchpacks
-GET /v1/benchpacks/registry
-GET /v1/providers
-GET /v1/models
-GET /v1/models/availability
-GET /v1/runs/active
-GET /v1/benchpacks/:benchPackId/history
-GET /v1/benchpacks/:benchPackId/history/:runId
-GET /v1/verifiers
+```text
+: BenchLocal agent event stream
 ```
 
-`GET /v1/config` must redact provider secrets.
+Each event is sent as:
 
-### Workspace Commands
-
-```http
-POST /v1/workspaces/:workspaceId/tabs
-PATCH /v1/tabs/:tabId
-POST /v1/tabs/:tabId/select-benchpack
-POST /v1/tabs/:tabId/select-models
-POST /v1/tabs/:tabId/sampling
-POST /v1/tabs/:tabId/execution-mode
-POST /v1/tabs/:tabId/runs-per-test
-POST /v1/tabs/:tabId/models/availability/refresh
+```text
+id: evt-...
+event: benchpack.run.event
+data: {"eventId":"evt-...","createdAt":"...","type":"benchpack.run.event","payload":{}}
 ```
 
-These should update `state.json` through the same workspace persistence path the UI uses.
+Event envelope:
 
-### Provider and Model Commands
-
-```http
-POST /v1/providers
-GET /v1/providers/:providerId
-PATCH /v1/providers/:providerId
-DELETE /v1/providers/:providerId
-POST /v1/providers/:providerId/duplicate
-GET /v1/providers/:providerId/models/discover
-POST /v1/models
-GET /v1/models/:modelId
-PATCH /v1/models/:modelId
-DELETE /v1/models/:modelId
-POST /v1/models/:modelId/duplicate
+```ts
+type BenchLocalAgentEvent<TPayload = unknown> = {
+  eventId: string;
+  createdAt: string;
+  type: BenchLocalAgentEventType;
+  payload: TPayload;
+};
 ```
 
-Provider responses must redact secrets. Deleting a provider should delete its linked models and remove those models from tab selections, matching the UI.
+Current event types:
 
-### Run Commands
-
-```http
-POST /v1/tabs/:tabId/runs
-POST /v1/tabs/:tabId/runs/:runId/resume
-POST /v1/tabs/:tabId/runs/:runId/retry-scenario
-POST /v1/tabs/:tabId/runs/:runId/retry-provider-errors
-POST /v1/tabs/:tabId/runs/:runId/retry-failed-results
-POST /v1/tabs/:tabId/runs/stop
+```text
+agent.state.updated
+config.updated
+workspace.updated
+models.availability.updated
+benchpack.run.started
+benchpack.run.event
+benchpack.run.finished
+benchpack.run.error
+verifier.event
 ```
 
-Run commands should return immediately with a run handle when possible, while detailed progress arrives through SSE.
+Important payloads:
 
-Long-running operations that currently return a final summary can keep doing so internally, but the HTTP layer should support async handles so agents are not forced to keep a request open for the whole run.
+```ts
+type BenchLocalAgentWorkspaceUpdatedPayload = {
+  state: BenchLocalWorkspaceState;
+};
 
-### Model Availability
+type BenchLocalAgentConfigUpdatedPayload = {
+  config: BenchLocalAgentSafeConfig;
+};
 
-```http
-POST /v1/models/availability/refresh
+type BenchLocalAgentModelAvailabilityPayload = {
+  availability: ModelAvailability[];
+};
+
+type BenchLocalAgentRunEventPayload = {
+  tabId: string;
+  benchPackId: string;
+  event: ProgressEvent;
+};
 ```
 
-## MCP Surface
+`benchpack.run.event` wraps the Bench Pack host progress event. The nested `event` may include scenario start, model progress, scenario result, run finish, run error, and other Bench Pack progress messages.
 
-```http
-POST /mcp
-Authorization: Bearer <token>
-Accept: application/json, text/event-stream
-Content-Type: application/json
+SSE is read-only. Do not add command semantics to SSE.
+
+## Shared Types
+
+### Provider
+
+```ts
+type BenchLocalProviderKind =
+  | "openrouter"
+  | "huggingface"
+  | "ollama"
+  | "llamacpp"
+  | "mlx"
+  | "lmstudio"
+  | "pico"
+  | "openai_compatible";
+
+type BenchLocalProviderConfig = {
+  kind: BenchLocalProviderKind;
+  name: string;
+  enabled: boolean;
+  base_url: string;
+  api_key?: string;
+  api_key_env?: string;
+};
 ```
 
-The MCP endpoint uses the official Streamable HTTP transport. It is stateless: commands that start long-running work return an accepted result while progress remains visible in the UI and can be polled through recent events.
+API and MCP provider reads redact `api_key` and expose:
 
-Resources:
+```ts
+type SafeProvider = Omit<BenchLocalProviderConfig, "api_key"> & {
+  has_api_key: boolean;
+  has_api_key_env: boolean;
+};
+```
 
-- `benchlocal://agent/guide`
-- `benchlocal://agent/openapi`
-- `benchlocal://state/config`
-- `benchlocal://state/workspaces`
-- `benchlocal://state/benchpacks`
-- `benchlocal://state/providers`
-- `benchlocal://state/models`
-- `benchlocal://state/runs/active`
-- `benchlocal://state/events/recent`
+### Model
 
-Tools are prefixed with `benchlocal_` and cover config reads, provider/model CRUD, tab setup, model availability, run start/resume/stop/retry, run history reads, verifier status, and recent event polling.
+```ts
+type BenchLocalModelConfig = {
+  id: string;
+  provider: string;
+  model: string;
+  label: string;
+  group: string;
+  enabled: boolean;
+};
+```
 
-Prompt:
+`provider` is the provider ID, not the provider display name.
 
-- `benchlocal-run-benchpack`
+### Workspace Tab
 
-This is important for the local-model flow. The agent can:
+```ts
+type BenchLocalExecutionMode =
+  | "serial"
+  | "serial_by_model"
+  | "parallel_by_model"
+  | "parallel_by_test_case"
+  | "full_parallel";
 
-1. start or ask the user to start a provider/model server
-2. refresh availability
-3. run available models
-4. stop the external server
-5. repeat with the next model
+type BenchLocalWorkspaceTabModelSelection = {
+  modelId: string;
+  alias?: string;
+};
 
-Example run flow:
+type BenchLocalWorkspaceTab = {
+  id: string;
+  title: string;
+  benchPackId: string | null;
+  loadedRunId?: string | null;
+  focusedScenarioId: string | null;
+  modelSelections: BenchLocalWorkspaceTabModelSelection[];
+  samplingOverrides?: GenerationRequest;
+  executionMode: BenchLocalExecutionMode;
+  runsPerTest: number;
+  createdAt: string;
+  updatedAt: string;
+};
+```
+
+### Generation
+
+```ts
+type GenerationRequest = {
+  temperature?: number;
+  top_p?: number;
+  top_k?: number;
+  min_p?: number;
+  repetition_penalty?: number;
+  presence_penalty?: number;
+  request_timeout_seconds?: number;
+};
+```
+
+Default request timeout is defined in core as `DEFAULT_BENCHLOCAL_REQUEST_TIMEOUT_SECONDS`.
+
+## HTTP API Reference
+
+All examples assume:
+
+```bash
+export BENCHLOCAL_AGENT_BASE_URL="http://127.0.0.1:50060"
+export BENCHLOCAL_AGENT_TOKEN="<token from Settings > Agent Access>"
+```
+
+### Read State
+
+#### `GET /v1/config`
+
+Returns redacted BenchLocal config.
+
+Response:
+
+```json
+{
+  "config": {
+    "schema_version": 1,
+    "ui": { "theme": "system" },
+    "agent": { "enabled": true, "access": "localhost", "port": 50060 },
+    "providers": {
+      "huggingface": {
+        "kind": "huggingface",
+        "name": "Hugging Face",
+        "enabled": true,
+        "base_url": "https://router.huggingface.co/v1",
+        "api_key_env": "HF_TOKEN",
+        "has_api_key": false,
+        "has_api_key_env": true
+      }
+    },
+    "models": []
+  }
+}
+```
+
+#### `GET /v1/workspaces`
+
+Returns the full workspace state:
+
+```json
+{
+  "path": "/Users/me/.benchlocal/state.json",
+  "created": false,
+  "state": {
+    "schema_version": 1,
+    "activeWorkspaceId": "workspace-main",
+    "workspaceOrder": ["workspace-main"],
+    "workspaces": {},
+    "tabs": {}
+  }
+}
+```
+
+#### `GET /v1/benchpacks`
+
+Returns installed Bench Packs and scenario metadata:
+
+```json
+{
+  "benchPacks": []
+}
+```
+
+#### `GET /v1/benchpacks/registry`
+
+Returns registry entries for installable Bench Packs:
+
+```json
+{
+  "registry": []
+}
+```
+
+#### `GET /v1/providers`
+
+Returns configured providers with secrets redacted:
+
+```json
+{
+  "providers": {
+    "huggingface": {
+      "kind": "huggingface",
+      "name": "Hugging Face",
+      "enabled": true,
+      "base_url": "https://router.huggingface.co/v1",
+      "api_key_env": "HF_TOKEN",
+      "has_api_key": false,
+      "has_api_key_env": true
+    }
+  }
+}
+```
+
+#### `GET /v1/providers/:providerId`
+
+Returns one redacted provider:
+
+```json
+{
+  "providerId": "huggingface",
+  "provider": {
+    "kind": "huggingface",
+    "name": "Hugging Face",
+    "enabled": true,
+    "base_url": "https://router.huggingface.co/v1",
+    "api_key_env": "HF_TOKEN",
+    "has_api_key": false,
+    "has_api_key_env": true
+  }
+}
+```
+
+#### `GET /v1/providers/:providerId/models/discover`
+
+Discovers provider models when the provider supports browsing.
+
+Response:
+
+```json
+{
+  "models": []
+}
+```
+
+This may call an external provider API and can fail when credentials or network access are unavailable.
+
+#### `GET /v1/models`
+
+Returns configured models:
+
+```json
+{
+  "models": [
+    {
+      "id": "huggingface:Qwen/Qwen3.5-9B",
+      "provider": "huggingface",
+      "model": "Qwen/Qwen3.5-9B",
+      "label": "Qwen3.5-9B",
+      "group": "primary",
+      "enabled": true
+    }
+  ]
+}
+```
+
+#### `GET /v1/models/:modelId`
+
+Returns one configured model:
+
+```json
+{
+  "model": {
+    "id": "huggingface:Qwen/Qwen3.5-9B",
+    "provider": "huggingface",
+    "model": "Qwen/Qwen3.5-9B",
+    "label": "Qwen3.5-9B",
+    "group": "primary",
+    "enabled": true
+  }
+}
+```
+
+#### `GET /v1/models/availability`
+
+Checks model availability for all configured models.
+
+Response:
+
+```json
+{
+  "availability": [
+    {
+      "modelId": "huggingface:Qwen/Qwen3.5-9B",
+      "available": true,
+      "checkedAt": "2026-05-18T00:00:00.000Z"
+    }
+  ]
+}
+```
+
+Exact availability fields are defined by `ModelAvailability` in `packages/benchlocal-core/src/protocol.ts`.
+
+#### `GET /v1/runs/active`
+
+Returns active benchmark runs:
+
+```json
+{
+  "activeRuns": []
+}
+```
+
+#### `GET /v1/verifiers`
+
+Returns verifier runtime status:
+
+```json
+{
+  "verifiers": []
+}
+```
+
+#### `GET /v1/benchpacks/:benchPackId/history`
+
+Returns run history entries for a Bench Pack:
+
+```json
+{
+  "history": []
+}
+```
+
+#### `GET /v1/benchpacks/:benchPackId/history/:runId`
+
+Returns a saved run summary:
+
+```json
+{
+  "run": {}
+}
+```
+
+### Providers
+
+#### `POST /v1/providers`
+
+Creates a provider.
+
+Allowed fields:
+
+```ts
+{
+  id?: string;
+  kind: BenchLocalProviderKind;
+  name?: string;
+  enabled?: boolean;
+  base_url: string;
+  api_key?: string;
+  api_key_env?: string;
+}
+```
+
+Example:
+
+```bash
+curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/v1/providers" \
+  -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{
+    "id": "huggingface",
+    "kind": "huggingface",
+    "name": "Hugging Face",
+    "enabled": true,
+    "base_url": "https://router.huggingface.co/v1",
+    "api_key_env": "HF_TOKEN"
+  }'
+```
+
+Returns `201`.
+
+#### `PATCH /v1/providers/:providerId`
+
+Patches a provider.
+
+Allowed fields:
+
+```ts
+{
+  kind?: BenchLocalProviderKind;
+  name?: string;
+  enabled?: boolean;
+  base_url?: string;
+  api_key?: string | null;
+  api_key_env?: string | null;
+}
+```
+
+Use `null` for `api_key` or `api_key_env` to clear stored values when supported by the controller.
+
+#### `DELETE /v1/providers/:providerId`
+
+Deletes a provider.
+
+Important behavior:
+
+- deletes linked models
+- removes linked models from tab selections
+- broadcasts config/workspace updates through the controller
+
+#### `POST /v1/providers/:providerId/duplicate`
+
+Duplicates one provider record.
+
+Important behavior:
+
+- duplicates only the provider
+- does not duplicate linked models
+
+### Models
+
+#### `POST /v1/models`
+
+Creates a model.
+
+Allowed fields:
+
+```ts
+{
+  id?: string;
+  provider: string;
+  model: string;
+  label?: string;
+  group?: string;
+  enabled?: boolean;
+}
+```
+
+Example:
+
+```bash
+curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/v1/models" \
+  -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{
+    "id": "huggingface:Qwen/Qwen3.5-9B",
+    "provider": "huggingface",
+    "model": "Qwen/Qwen3.5-9B",
+    "label": "Qwen3.5-9B",
+    "group": "primary",
+    "enabled": true
+  }'
+```
+
+Returns `201`.
+
+#### `PATCH /v1/models/:modelId`
+
+Patches a model.
+
+Allowed fields:
+
+```ts
+{
+  id?: string;
+  provider?: string;
+  model?: string;
+  label?: string;
+  group?: string;
+  enabled?: boolean;
+}
+```
+
+If the ID changes, the controller must preserve consistency with tab selections.
+
+#### `DELETE /v1/models/:modelId`
+
+Deletes one model and removes it from tab selections.
+
+#### `POST /v1/models/:modelId/duplicate`
+
+Duplicates one model record.
+
+#### `POST /v1/models/availability/refresh`
+
+Refreshes model availability globally or for selected model IDs.
+
+Allowed fields:
+
+```ts
+{
+  modelIds?: string[];
+}
+```
+
+Example:
+
+```bash
+curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/v1/models/availability/refresh" \
+  -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{"modelIds":["huggingface:Qwen/Qwen3.5-9B"]}'
+```
+
+Response:
+
+```json
+{
+  "availability": []
+}
+```
+
+Also emits `models.availability.updated` when the controller broadcasts availability changes.
+
+### Workspace and Tabs
+
+#### `POST /v1/workspaces/:workspaceId/tabs`
+
+Creates a workspace tab.
+
+Allowed fields:
+
+```ts
+{
+  benchPackId?: string | null;
+  title?: string;
+  modelSelections?: Array<{ modelId: string; alias?: string }>;
+}
+```
+
+Example:
+
+```bash
+curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/v1/workspaces/$WORKSPACE_ID/tabs" \
+  -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{
+    "benchPackId": "toolcall-15",
+    "title": "ToolCall-15",
+    "modelSelections": [
+      { "modelId": "huggingface:Qwen/Qwen3.5-9B" }
+    ]
+  }'
+```
+
+Returns `201` and the updated workspace state.
+
+#### `PATCH /v1/tabs/:tabId`
+
+Patches a tab.
+
+Allowed fields:
+
+```ts
+{
+  title?: string;
+  focusedScenarioId?: string | null;
+  modelSelections?: Array<{ modelId: string; alias?: string }>;
+  samplingOverrides?: GenerationRequest;
+  executionMode?: BenchLocalExecutionMode;
+  runsPerTest?: number;
+}
+```
+
+Use this for compound updates. Prefer the more specific endpoints below for common UI actions because they document intent better.
+
+#### `POST /v1/tabs/:tabId/select-benchpack`
+
+Selects or clears a Bench Pack for a tab.
+
+Allowed fields:
+
+```ts
+{
+  benchPackId: string | null;
+  title?: string;
+}
+```
+
+#### `POST /v1/tabs/:tabId/select-models`
+
+Selects models for a tab.
+
+Allowed fields:
+
+```ts
+{
+  modelIds?: string[];
+  selections?: Array<{ modelId: string; alias?: string }>;
+}
+```
+
+`modelIds` is the compact form. `selections` is the explicit form and supports aliases.
+
+Example:
+
+```bash
+curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/v1/tabs/$TAB_ID/select-models" \
+  -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{
+    "modelIds": [
+      "huggingface:Qwen/Qwen3.5-9B",
+      "huggingface:qwen3.6:35b-a3b"
+    ]
+  }'
+```
+
+#### `POST /v1/tabs/:tabId/sampling`
+
+Sets tab sampling overrides.
+
+Allowed fields:
+
+```ts
+{
+  samplingOverrides: GenerationRequest;
+}
+```
+
+Example:
+
+```json
+{
+  "samplingOverrides": {
+    "temperature": 0,
+    "top_p": 1,
+    "request_timeout_seconds": 500
+  }
+}
+```
+
+#### `POST /v1/tabs/:tabId/execution-mode`
+
+Sets tab execution mode and optionally runs-per-test.
+
+Allowed fields:
+
+```ts
+{
+  executionMode: BenchLocalExecutionMode;
+  runsPerTest?: number;
+}
+```
+
+Execution mode values:
+
+```text
+serial
+serial_by_model
+parallel_by_model
+parallel_by_test_case
+full_parallel
+```
+
+#### `POST /v1/tabs/:tabId/runs-per-test`
+
+Sets tab runs-per-test.
+
+Allowed fields:
+
+```ts
+{
+  runsPerTest: number;
+}
+```
+
+#### `POST /v1/tabs/:tabId/models/availability/refresh`
+
+Refreshes availability for a tab.
+
+Allowed fields:
+
+```ts
+{
+  modelIds?: string[];
+}
+```
+
+If `modelIds` is omitted, the selected model IDs from the tab are used.
+
+### Runs
+
+Run commands are asynchronous unless otherwise noted. They return quickly, while detailed progress is emitted through `GET /v1/events` and visible in the desktop UI.
+
+#### `POST /v1/tabs/:tabId/runs`
+
+Starts a run for a tab.
+
+Allowed fields:
+
+```ts
+{
+  benchPackId?: string;
+  modelIds?: string[];
+  executionMode?: BenchLocalExecutionMode;
+  runsPerTest?: number;
+  generation?: GenerationRequest;
+}
+```
+
+Resolution behavior:
+
+- `benchPackId` defaults to the tab's selected Bench Pack
+- `modelIds` defaults to the tab's selected models
+- `executionMode` defaults to the tab's execution mode
+- `runsPerTest` defaults to the tab's runs-per-test
+- `generation` defaults to the tab's sampling overrides
+
+Response:
+
+```json
+{
+  "accepted": true,
+  "tabId": "tab-..."
+}
+```
+
+Status code: `202`.
+
+The run will set `loadedRunId` on the tab after a summary is produced.
+
+#### `POST /v1/tabs/:tabId/runs/stop`
+
+Stops the active run for a tab.
+
+Response depends on controller state, but generally includes whether a run was stopped.
+
+Unlike start/resume/retry, this is synchronous.
+
+#### `POST /v1/tabs/:tabId/runs/:runId/resume`
+
+Resumes a historical run.
+
+Allowed fields:
+
+```ts
+{
+  executionMode?: BenchLocalExecutionMode;
+  runsPerTest?: number;
+  generation?: GenerationRequest;
+}
+```
+
+Response:
+
+```json
+{
+  "accepted": true,
+  "tabId": "tab-...",
+  "runId": "run-..."
+}
+```
+
+Status code: `202`.
+
+#### `POST /v1/tabs/:tabId/runs/:runId/retry-scenario`
+
+Retries one scenario/model cell from a saved run.
+
+Allowed fields:
+
+```ts
+{
+  scenarioId: string;
+  modelId: string;
+  runsPerTest?: number;
+  generation?: GenerationRequest;
+}
+```
+
+Response:
+
+```json
+{
+  "accepted": true,
+  "tabId": "tab-...",
+  "runId": "run-..."
+}
+```
+
+Status code: `202`.
+
+#### `POST /v1/tabs/:tabId/runs/:runId/retry-provider-errors`
+
+Retries provider-error cells from a saved run.
+
+Allowed fields:
+
+```ts
+{
+  runsPerTest?: number;
+  generation?: GenerationRequest;
+}
+```
+
+Response when there is work:
+
+```json
+{
+  "accepted": true,
+  "tabId": "tab-...",
+  "runId": "run-...",
+  "kind": "provider_errors",
+  "cellCount": 2,
+  "groupCount": 1
+}
+```
+
+Status code: `202`.
+
+Response when there is no eligible work:
+
+```json
+{
+  "accepted": false,
+  "tabId": "tab-...",
+  "runId": "run-...",
+  "kind": "provider_errors",
+  "cellCount": 0,
+  "groupCount": 0
+}
+```
+
+Status code: `200`.
+
+Provider-error classification must come from provider failure metadata and HTTP response status handling, not from scanning verifier failure summaries.
+
+#### `POST /v1/tabs/:tabId/runs/:runId/retry-failed-results`
+
+Retries non-provider failed cells from a saved run.
+
+Allowed fields:
+
+```ts
+{
+  runsPerTest?: number;
+  generation?: GenerationRequest;
+}
+```
+
+Response shape matches retry-provider-errors, with:
+
+```json
+{
+  "kind": "failed_results"
+}
+```
+
+## Recommended HTTP Workflow
+
+This is the workflow agents should use for a live benchmark run:
+
+1. `GET /v1/health`
+2. `GET /v1/workspaces`
+3. `GET /v1/benchpacks`
+4. `GET /v1/providers`
+5. `GET /v1/models`
+6. Open `GET /v1/events` and keep it open.
+7. Create or patch a tab.
+8. Select Bench Pack and models.
+9. Refresh model availability.
+10. Set sampling, execution mode, and runs-per-test if needed.
+11. Start the run.
+12. Watch `benchpack.run.event` until a finished, cancelled, or error event appears.
+
+Example:
 
 ```bash
 curl "$BENCHLOCAL_AGENT_BASE_URL/v1/benchpacks" \
@@ -268,177 +1132,436 @@ curl "$BENCHLOCAL_AGENT_BASE_URL/v1/benchpacks" \
 curl "$BENCHLOCAL_AGENT_BASE_URL/v1/workspaces" \
   -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN"
 
-curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/v1/workspaces/<workspace-id>/tabs" \
+curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/v1/workspaces/$WORKSPACE_ID/tabs" \
   -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN" \
   -H "content-type: application/json" \
-  -d '{"benchPackId":"toolcall-15"}'
+  -d '{"benchPackId":"toolcall-15","title":"ToolCall-15"}'
 
-curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/v1/tabs/<tab-id>/select-models" \
+curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/v1/tabs/$TAB_ID/select-models" \
   -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN" \
   -H "content-type: application/json" \
-  -d '{"modelIds":["ollama:qwen3.5:9b"]}'
+  -d '{"modelIds":["huggingface:Qwen/Qwen3.5-9B"]}'
 
-curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/v1/models/availability/refresh" \
-  -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN" \
-  -H "content-type: application/json" \
-  -d '{"modelIds":["ollama:qwen3.5:9b"]}'
-
-curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/v1/tabs/<tab-id>/runs" \
+curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/v1/tabs/$TAB_ID/models/availability/refresh" \
   -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN" \
   -H "content-type: application/json" \
   -d '{}'
+
+curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/v1/tabs/$TAB_ID/runs" \
+  -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{"executionMode":"serial_by_model","runsPerTest":1}'
 ```
 
-## CLI
+## MCP Surface
 
-Add CLI after the HTTP API is stable:
-
-```bash
-benchlocal agent status
-benchlocal agent events
-benchlocal benchpacks list
-benchlocal models list
-benchlocal models availability --refresh
-benchlocal tabs create --benchpack toolcall-15
-benchlocal tabs select-models <tab-id> qwen3.5:9b
-benchlocal runs start <tab-id>
-benchlocal runs resume <tab-id> <run-id>
-benchlocal runs stop <tab-id>
-```
-
-The CLI should only discover the local server and call HTTP. It should not directly read and mutate BenchLocal files unless the desktop app is not running and a future headless mode explicitly supports it.
-
-## Model Server Orchestration
-
-Do not let agents send arbitrary shell commands to BenchLocal in v1.
-
-Starting arbitrary local processes from an agent-controlled API is a security and support risk. It also increases tech debt because BenchLocal would need to become a process supervisor for Ollama, llama.cpp, MLX, LM Studio, Docker, and custom scripts.
-
-Recommended v1 behavior:
-
-- BenchLocal controls benchmark state.
-- The agent controls external model servers outside BenchLocal using its own environment.
-- BenchLocal exposes model availability and run/resume controls so the agent can coordinate safely.
-
-Possible v2:
-
-- add user-defined provider launcher profiles
-- each profile has explicit start, stop, healthcheck, cwd, env allowlist, and timeout settings
-- profiles are edited in the UI
-- the agent can only invoke named profiles, not arbitrary commands
-- every invocation is visible in the UI and logged
-
-Example v2 API:
+BenchLocal exposes MCP through:
 
 ```http
-GET /v1/provider-launchers
-POST /v1/provider-launchers/:id/start
-POST /v1/provider-launchers/:id/stop
+POST /mcp
+Authorization: Bearer <token>
+Content-Type: application/json
+Accept: application/json, text/event-stream
 ```
 
-## Product UX
+`POST /v1/mcp` is accepted as an alias.
 
-Add a Settings page section named `Agent Access`.
+Implementation details:
 
-Controls:
+- Uses `@modelcontextprotocol/sdk`.
+- Uses `StreamableHTTPServerTransport`.
+- `sessionIdGenerator` is disabled, so the server is stateless per request.
+- `GET`, `DELETE`, and non-`POST` requests return MCP method-not-allowed JSON-RPC errors.
+- Long-running tools return `accepted: true`; progress is obtained from the UI, recent events, or the SSE stream.
 
-- enable local agent API
-- port selector or automatic port
-- copy session token
-- regenerate session token
-- show connected clients
-- show recent agent actions
-- stop all active agent sessions
+### MCP Client Configuration
 
-In the main test view, agent-triggered changes should look exactly like user-triggered changes:
+Use the bearer token as an Authorization header.
 
-- a tab appears when the agent creates one
-- selected Bench Pack and models update in the UI
-- run progress appears in the existing table
-- stop/resume/retry buttons remain usable by the user
+Generic MCP client shape:
 
-Add a small indicator when agent access is active. It should not dominate the normal benchmark UI.
+```json
+{
+  "mcpServers": {
+    "benchlocal": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:50060/mcp",
+      "headers": {
+        "Authorization": "Bearer <token>"
+      }
+    }
+  }
+}
+```
 
-## Safety Rules
+Exact configuration keys vary by MCP client.
 
-- bind only to `127.0.0.1`
-- require a bearer token for every non-health endpoint
-- redact secrets from all API responses
-- reject unknown JSON fields for write commands
-- include request IDs in responses and event payloads
-- serialize writes that mutate config/workspace state
-- never allow arbitrary file reads/writes through the API
-- never allow arbitrary shell execution in v1
-- log agent actions to BenchLocal logs
+### MCP Resources
 
-## MVP Scope
+| Resource URI | Description |
+| --- | --- |
+| `benchlocal://agent/guide` | Runtime agent guide Markdown. |
+| `benchlocal://agent/openapi` | Runtime OpenAPI JSON document. |
+| `benchlocal://state/config` | Redacted BenchLocal config. |
+| `benchlocal://state/workspaces` | Workspace and tab state. |
+| `benchlocal://state/benchpacks` | Installed Bench Packs and scenario metadata. |
+| `benchlocal://state/providers` | Configured providers with secrets redacted. |
+| `benchlocal://state/models` | Configured models. |
+| `benchlocal://state/runs/active` | Active benchmark runs. |
+| `benchlocal://state/events/recent` | Recent Agent API events. |
 
-MVP should include:
+### MCP Prompt
 
-- shared main-process controller
-- local HTTP server disabled by default
-- token-protected JSON endpoints
-- SSE event stream
-- read endpoints for health, config metadata, workspaces, Bench Packs, models, availability, active runs, and history
-- write endpoints for create tab, select Bench Pack, select models, refresh availability, run, resume, retry, and stop
-- renderer receives the same event/state updates when agent commands mutate state
-- docs with example curl commands
+#### `benchlocal-run-benchpack`
 
-Defer:
+Arguments:
 
-- arbitrary model server process management
-- provider launcher profiles
-- remote network binding
-- multi-user auth
-- full headless mode
-- full CLI package
-- MCP server
+```ts
+{
+  benchPackId: string;
+  modelIds: string; // comma-separated model IDs
+  workspaceId?: string;
+}
+```
 
-## Implementation Phases
+Use this prompt to teach an MCP-capable agent the preferred run workflow:
 
-1. Extract controller
-   - move logic currently embedded in IPC handlers into typed controller methods
-   - keep renderer behavior unchanged
-   - add tests or compile checks around the controller API
+- inspect workspaces
+- choose or create a tab
+- select the Bench Pack
+- select models
+- refresh availability
+- start a run
+- poll recent events while the UI updates in real time
 
-2. Add event bus
-   - route run progress and mutation events through one broadcaster
-   - keep IPC event names stable for the renderer
+### MCP Tools
 
-3. Add local agent server
-   - implement HTTP routing with Node's built-in `http` module or a very small dependency
-   - add token auth
-   - add `/v1/health` and `/v1/events`
+All MCP tools return JSON as text content and, where possible, structured content.
 
-4. Add read endpoints
-   - expose redacted config, workspaces, Bench Packs, models, availability, active runs, and history
+#### Health and State
 
-5. Add write endpoints
-   - create/update tab state
-   - select Bench Pack and models
-   - refresh availability
-   - start/resume/retry/stop runs
+| Tool | Read-only | Input | Result |
+| --- | --- | --- | --- |
+| `benchlocal_get_health` | yes | `{}` | Runtime compatibility and health. |
+| `benchlocal_get_config` | yes | `{}` | Redacted config. |
+| `benchlocal_list_workspaces` | yes | `{}` | Workspace and tab state. |
+| `benchlocal_list_benchpacks` | yes | `{}` | Installed Bench Packs. |
+| `benchlocal_list_benchpack_registry` | yes | `{}` | Registry entries. |
+| `benchlocal_list_active_runs` | yes | `{}` | Active runs. |
+| `benchlocal_list_verifiers` | yes | `{}` | Verifier runtime status. |
+| `benchlocal_get_recent_events` | yes | `{ limit?: number }` | Recent events, newest `limit` if provided. |
 
-6. Add UI controls
-   - Settings > Agent Access
-   - active API indicator
-   - connected clients and action log
+#### Providers
 
-7. Add CLI wrapper
-   - local server discovery
-   - token loading
-   - status/list/run/resume/events commands
+| Tool | Input | Result |
+| --- | --- | --- |
+| `benchlocal_list_providers` | `{}` | Redacted providers. |
+| `benchlocal_get_provider` | `{ providerId: string }` | One redacted provider. |
+| `benchlocal_create_provider` | `{ id?, kind, name?, enabled?, base_url, api_key?, api_key_env? }` | Created provider result. |
+| `benchlocal_update_provider` | `{ providerId, kind?, name?, enabled?, base_url?, api_key?, api_key_env? }` | Updated provider result. |
+| `benchlocal_delete_provider` | `{ providerId }` | Delete result. Destructive. |
+| `benchlocal_duplicate_provider` | `{ providerId }` | Duplicate provider result. |
+| `benchlocal_discover_provider_models` | `{ providerId }` | Provider model discovery result. |
 
-## Main Risk
+`kind` must be one of:
 
-The highest-risk part is state synchronization between agent commands and the renderer. The controller should treat workspace/config mutations as durable state changes and broadcast updates after each save. The renderer should be able to reload or patch from those events without assuming it was the initiator.
+```text
+openrouter
+huggingface
+ollama
+llamacpp
+mlx
+lmstudio
+pico
+openai_compatible
+```
 
-The second risk is long-running command semantics. Run commands should produce real-time SSE updates and should not depend on one HTTP request remaining open for an entire benchmark run.
+#### Models
 
-## Open Questions
+| Tool | Input | Result |
+| --- | --- | --- |
+| `benchlocal_list_models` | `{}` | Configured models. |
+| `benchlocal_get_model` | `{ modelId: string }` | One model. |
+| `benchlocal_create_model` | `{ id?, provider, model, label?, group?, enabled? }` | Created model result. |
+| `benchlocal_update_model` | `{ modelId, id?, provider?, model?, label?, group?, enabled? }` | Updated model result. |
+| `benchlocal_delete_model` | `{ modelId }` | Delete result. Destructive. |
+| `benchlocal_duplicate_model` | `{ modelId }` | Duplicate model result. |
+| `benchlocal_check_model_availability` | `{ modelIds?: string[] }` | Availability result. |
+| `benchlocal_refresh_model_availability` | `{ tabId?: string, modelIds?: string[] }` | Availability result. |
 
-- Should agent access be available only in dev builds at first, or behind an experimental setting in production?
-- Should the session token rotate each time BenchLocal starts, or persist until regenerated?
-- Should a connected agent be allowed to install/update/uninstall Bench Packs in v1, or should v1 only operate on already installed packs?
-- Should the API support only the active workspace at first, or all workspaces?
-- Should MCP be a later bridge on top of the HTTP API, or should it be introduced with the CLI?
+`benchlocal_refresh_model_availability` uses selected tab models when `tabId` is provided and `modelIds` is omitted.
+
+#### Tabs
+
+| Tool | Input | Result |
+| --- | --- | --- |
+| `benchlocal_create_tab` | `{ workspaceId, benchPackId?, title?, modelSelections? }` | Updated workspace state. |
+| `benchlocal_patch_tab` | `{ tabId, title?, focusedScenarioId?, modelSelections?, samplingOverrides?, executionMode?, runsPerTest? }` | Updated workspace state. |
+| `benchlocal_select_benchpack` | `{ tabId, benchPackId, title? }` | Updated workspace state. |
+| `benchlocal_select_models` | `{ tabId, modelIds?, selections? }` | Updated workspace state. |
+| `benchlocal_set_sampling` | `{ tabId, samplingOverrides }` | Updated workspace state. |
+| `benchlocal_set_execution_mode` | `{ tabId, executionMode, runsPerTest? }` | Updated workspace state. |
+| `benchlocal_set_runs_per_test` | `{ tabId, runsPerTest }` | Updated workspace state. |
+
+`modelSelections` and `selections` use:
+
+```ts
+Array<{ modelId: string; alias?: string }>
+```
+
+#### Runs
+
+| Tool | Input | Result |
+| --- | --- | --- |
+| `benchlocal_start_run` | `{ tabId, benchPackId?, modelIds?, executionMode?, runsPerTest?, generation? }` | `{ accepted: true, tabId }` |
+| `benchlocal_resume_run` | `{ tabId, runId, executionMode?, runsPerTest?, generation? }` | `{ accepted: true, tabId, runId }` |
+| `benchlocal_retry_scenario` | `{ tabId, runId, scenarioId, modelId, runsPerTest?, generation? }` | `{ accepted: true, tabId, runId }` |
+| `benchlocal_retry_provider_errors` | `{ tabId, runId, runsPerTest?, generation? }` | Retry batch plan and accepted state. |
+| `benchlocal_retry_failed_results` | `{ tabId, runId, runsPerTest?, generation? }` | Retry batch plan and accepted state. |
+| `benchlocal_stop_run` | `{ tabId }` | Stop result. |
+| `benchlocal_list_run_history` | `{ benchPackId }` | Run history. |
+| `benchlocal_get_run_summary` | `{ benchPackId, runId }` | Saved run summary. |
+
+Run tools that start work return before the benchmark completes. Poll with:
+
+```text
+benchlocal_get_recent_events
+benchlocal://state/events/recent
+GET /v1/events
+```
+
+## MCP Recommended Workflow
+
+For an agent controlling a local model benchmark:
+
+1. Read `benchlocal://state/workspaces`.
+2. Read `benchlocal://state/benchpacks`.
+3. Call `benchlocal_list_providers`.
+4. Call `benchlocal_list_models`.
+5. Create or patch a tab with `benchlocal_create_tab` or `benchlocal_patch_tab`.
+6. Select the Bench Pack with `benchlocal_select_benchpack`.
+7. Select models with `benchlocal_select_models`.
+8. Ask the user to start the external local model server, or start it outside BenchLocal if the agent has its own safe tool for that.
+9. Call `benchlocal_refresh_model_availability`.
+10. Call `benchlocal_start_run`.
+11. Poll `benchlocal_get_recent_events` while the BenchLocal UI shows the run.
+12. When the model server changes, refresh availability and resume or retry eligible results.
+
+## Security and Safety
+
+Required invariants:
+
+- `GET /v1/health` is the only unauthenticated route.
+- Every other HTTP route requires the bearer token.
+- MCP requires the bearer token and local Origin.
+- Config reads use `getSafeConfig`.
+- Provider reads use redacted provider helpers.
+- No route returns `api_key`.
+- Routes reject unknown JSON fields.
+- Routes do not allow arbitrary file reads or writes.
+- Routes do not allow arbitrary shell execution.
+- Destructive MCP tools are annotated with `destructiveHint`.
+
+Local Network mode:
+
+- is intended only for trusted networks
+- exposes the server on `0.0.0.0`
+- still requires the bearer token
+- should be treated like any local automation endpoint with write access to benchmark state
+
+## How To Extend The Agent Surface
+
+When a new UI feature should be agent-controllable, update HTTP and MCP together.
+
+Definition of done:
+
+1. Add or reuse a controller method in `app/src/main/controller.ts`.
+2. Add shared request/response/event types in `packages/benchlocal-core/src/agent-protocol.ts` when the payload is not trivial.
+3. Add an IPC adapter only if the renderer needs a new direct operation.
+4. Add an HTTP route in `app/src/main/agent-server.ts`.
+5. Add strict JSON key validation with `assertOnlyKeys`.
+6. Add auth and redaction rules before returning data.
+7. Add or update OpenAPI output in `createOpenApiDocument`.
+8. Add or update the runtime guide in `createAgentGuide` if agents need to learn the feature.
+9. Add an MCP resource when the feature exposes durable readable state.
+10. Add an MCP tool when the feature is an action.
+11. Add MCP annotations:
+    - `readOnlyHint: true` for pure reads
+    - `destructiveHint: true` for deletes or irreversible changes
+    - `openWorldHint: true` when the tool may call external providers or start long-running benchmark work
+12. Emit or reuse a controller event so the renderer, SSE clients, and recent-event MCP polling all see the same change.
+13. Update this document.
+14. Run typecheck and a manual local API smoke test.
+
+Do not add a UI-only feature that should be automatable without also deciding one of:
+
+- expose it through HTTP and MCP now
+- explicitly mark it as UI-only in this document with a reason
+
+## Event Extension Rules
+
+Add new event types only when existing events cannot represent the change.
+
+Prefer:
+
+- `workspace.updated` when tab/workspace state changes
+- `config.updated` when config changes
+- `models.availability.updated` when availability changes
+- `benchpack.run.event` for benchmark progress
+- `verifier.event` for verifier lifecycle
+
+When adding a new event type:
+
+1. Add it to `BenchLocalAgentEventType`.
+2. Define a payload type.
+3. Emit it from the controller.
+4. Broadcast it through the existing event bus.
+5. Add it to this doc.
+6. Include it in runtime guide text if agents need to react to it.
+
+## HTTP Route Extension Pattern
+
+Use this shape in `agent-server.ts`:
+
+```ts
+if (request.method === "POST" && segments.length === 3 && segments[0] === "example") {
+  const body = await readJsonRequest(request);
+  assertOnlyKeys(body, ["allowedField"]);
+  sendJson(response, 200, await this.controller.example(body as BenchLocalAgentExampleRequest));
+  return;
+}
+```
+
+For long-running commands:
+
+```ts
+void this.controller.longRunningOperation(input).catch((error) => {
+  console.error("[benchlocal] agent-started operation failed", error);
+});
+
+sendJson(response, 202, { accepted: true, ...handle });
+```
+
+Use `202` when work has been accepted but not completed.
+
+Use `200` when the command completed synchronously or when there was no eligible work.
+
+## MCP Tool Extension Pattern
+
+Use this shape in `agent-mcp.ts`:
+
+```ts
+server.registerTool(
+  "benchlocal_example_action",
+  {
+    title: "Example Action",
+    description: "Do the same operation exposed by the UI and HTTP API.",
+    inputSchema: {
+      id: z.string()
+    },
+    annotations: { readOnlyHint: false, openWorldHint: false }
+  },
+  async ({ id }) => jsonToolResult(await controller.example(id))
+);
+```
+
+For long-running tools, return an accepted result and rely on recent events:
+
+```ts
+void controller.longRunningOperation(input).catch((error) => {
+  console.error("[benchlocal] mcp-started operation failed", error);
+});
+
+return jsonToolResult({ accepted: true, id });
+```
+
+## Manual Smoke Tests
+
+Use these after changing HTTP or MCP.
+
+Health:
+
+```bash
+curl "$BENCHLOCAL_AGENT_BASE_URL/v1/health"
+```
+
+Auth failure:
+
+```bash
+curl "$BENCHLOCAL_AGENT_BASE_URL/v1/models"
+```
+
+Expected: `401`.
+
+List models:
+
+```bash
+curl "$BENCHLOCAL_AGENT_BASE_URL/v1/models" \
+  -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN"
+```
+
+SSE:
+
+```bash
+curl -N "$BENCHLOCAL_AGENT_BASE_URL/v1/events" \
+  -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN"
+```
+
+Create tab:
+
+```bash
+curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/v1/workspaces/$WORKSPACE_ID/tabs" \
+  -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{"benchPackId":"toolcall-15","title":"ToolCall-15"}'
+```
+
+MCP initialize example:
+
+```bash
+curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/mcp" \
+  -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN" \
+  -H "content-type: application/json" \
+  -H "accept: application/json, text/event-stream" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "protocolVersion": "2025-03-26",
+      "capabilities": {},
+      "clientInfo": {
+        "name": "curl-smoke",
+        "version": "0.0.0"
+      }
+    }
+  }'
+```
+
+MCP list tools example:
+
+```bash
+curl -X POST "$BENCHLOCAL_AGENT_BASE_URL/mcp" \
+  -H "Authorization: Bearer $BENCHLOCAL_AGENT_TOKEN" \
+  -H "content-type: application/json" \
+  -H "accept: application/json, text/event-stream" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/list",
+    "params": {}
+  }'
+```
+
+## Current Non-Goals
+
+BenchLocal Agent API and MCP do not currently:
+
+- install or uninstall Bench Packs
+- start arbitrary local model servers
+- supervise Ollama, llama.cpp, MLX, LM Studio, Docker, or custom scripts
+- expose general file-system access
+- expose arbitrary shell execution
+- replace the desktop UI
+
+For local model orchestration, the agent should manage external model servers using its own environment or ask the user to start/stop them. BenchLocal should expose availability, run, resume, retry, and stop controls so that coordination remains visible in the UI.
