@@ -5,6 +5,7 @@ import path from "node:path";
 import type {
   BenchLocalAgentAccess,
   BenchLocalAgentAccessState,
+  BenchLocalAgentEvent,
   BenchLocalAgentCreateModelRequest,
   BenchLocalAgentCreateProviderRequest,
   BenchLocalAgentCreateTabRequest,
@@ -25,6 +26,7 @@ import type {
 } from "@core";
 import { getBenchLocalHome, loadOrCreateConfig } from "@core";
 import { benchLocalController, type BenchLocalController } from "./controller";
+import { handleBenchLocalMcpRequest } from "./agent-mcp";
 
 type AgentSession = {
   token: string;
@@ -42,6 +44,7 @@ type RetryBatchKind = "provider_errors" | "failed_results";
 const DEFAULT_AGENT_ACCESS = "localhost" as const;
 const AGENT_SESSION_PATH = path.join(getBenchLocalHome(), "agent-session.json");
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
+const MAX_RECENT_AGENT_EVENTS = 500;
 
 function createToken(): string {
   return randomBytes(32).toString("base64url");
@@ -96,6 +99,20 @@ function getAgentHost(access: BenchLocalAgentAccess): "127.0.0.1" | "0.0.0.0" {
 
 function getAgentLocalClientHost(): "127.0.0.1" {
   return "127.0.0.1";
+}
+
+function isAllowedLocalOrigin(value: string | undefined): boolean {
+  if (!value) {
+    return true;
+  }
+
+  try {
+    const origin = new URL(value);
+    const hostname = origin.hostname.toLowerCase();
+    return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1" || hostname === "[::1]";
+  } catch {
+    return false;
+  }
 }
 
 function normalizeString(value: unknown, field: string): string {
@@ -177,6 +194,7 @@ class BenchLocalAgentServer {
   private server: Server | null = null;
   private session: AgentSession | null = null;
   private connectedClients = new Set<ServerResponse>();
+  private recentEvents: BenchLocalAgentEvent[] = [];
   private enabled = false;
   private access: BenchLocalAgentAccess = DEFAULT_AGENT_ACCESS;
   private configuredPort: number | undefined;
@@ -186,6 +204,12 @@ class BenchLocalAgentServer {
 
   constructor(private readonly controller: BenchLocalController) {
     this.controller.onAgentEvent((event) => {
+      this.recentEvents.push(event);
+
+      if (this.recentEvents.length > MAX_RECENT_AGENT_EVENTS) {
+        this.recentEvents.splice(0, this.recentEvents.length - MAX_RECENT_AGENT_EVENTS);
+      }
+
       this.broadcastSse(event.type, event.eventId, event);
     });
   }
@@ -383,13 +407,24 @@ class BenchLocalAgentServer {
         agent: this.getState({ includeToken: false }),
         docs: {
           agentGuide: "/v1/agent-guide",
-          openapi: "/v1/openapi.json"
+          openapi: "/v1/openapi.json",
+          mcp: "/mcp"
         }
       });
       return;
     }
 
     await this.requireAuth(request);
+
+    if (url.pathname === "/mcp" || url.pathname === "/v1/mcp") {
+      this.requireLocalOrigin(request);
+      await handleBenchLocalMcpRequest(this.controller, {
+        getAgentGuide: () => this.createAgentGuide(),
+        getOpenApiDocument: () => this.createOpenApiDocument(),
+        getRecentEvents: () => [...this.recentEvents]
+      }, request, response);
+      return;
+    }
 
     if (request.method === "GET" && url.pathname === "/v1/events") {
       this.openSse(response);
@@ -420,6 +455,12 @@ class BenchLocalAgentServer {
 
     if (authorization !== expected) {
       throw new HttpError(401, "Unauthorized.");
+    }
+  }
+
+  private requireLocalOrigin(request: IncomingMessage): void {
+    if (!isAllowedLocalOrigin(request.headers.origin)) {
+      throw new HttpError(403, "MCP requests must use a localhost Origin header or omit Origin.");
     }
   }
 
@@ -461,8 +502,10 @@ class BenchLocalAgentServer {
     return `# BenchLocal Agent API
 
 BenchLocal exposes local HTTP JSON commands plus Server-Sent Events for live progress.
+It also exposes an MCP Streamable HTTP endpoint for agents that prefer standard tool calls.
 
 Base URL: \`${baseUrl}\`
+MCP URL: \`${baseUrl}/mcp\`
 
 Authentication:
 
@@ -473,6 +516,16 @@ Authorization: Bearer <token>
 The token is shown in BenchLocal Settings > Agent Access. All endpoints except \`GET /v1/health\` require this bearer token.
 Provider, model, Bench Pack, tab, and run IDs used in path segments must be URL-encoded. This matters for model IDs such as \`provider:Qwen/Qwen3.5-9B\`.
 When Agent Access is set to Local Network, BenchLocal listens on \`0.0.0.0\`; agents on other devices should use this machine's LAN IP address with the same port and bearer token.
+
+## MCP Endpoint
+
+Use \`POST /mcp\` as a Streamable HTTP MCP endpoint with the same bearer token. BenchLocal exposes:
+
+- Resources for guide, OpenAPI, config, workspace, Bench Packs, providers, models, active runs, and recent events.
+- Tools named with the \`benchlocal_\` prefix for provider/model CRUD, tab setup, model availability, run start/resume/stop/retry, history reads, and verifier reads.
+- Prompt \`benchlocal-run-benchpack\` for the recommended run workflow.
+
+This MCP server is stateless. Long-running run tools return \`accepted: true\`; inspect the UI, call \`benchlocal_get_recent_events\`, or read \`benchlocal://state/events/recent\` for progress.
 
 ## Recommended Agent Workflow
 
@@ -576,6 +629,7 @@ Discovery:
 
 - \`GET /v1/agent-guide\`
 - \`GET /v1/openapi.json\`
+- \`POST /mcp\`
 
 ## Request Examples
 
@@ -657,6 +711,16 @@ Refresh selected models:
         }
       },
       paths: {
+        "/mcp": {
+          post: {
+            summary: "Handle MCP Streamable HTTP JSON-RPC requests.",
+            description: "Standard MCP endpoint exposing BenchLocal resources, prompts, and benchlocal_* tools. Uses the same bearer token as the Agent API.",
+            security: bearerSecurity,
+            responses: {
+              "200": { description: "MCP JSON-RPC response or event stream." }
+            }
+          }
+        },
         "/v1/health": {
           get: {
             summary: "Check whether the local agent API is reachable.",

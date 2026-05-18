@@ -23,6 +23,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "electron-updater": "^6.6.2",
     "lucide-react": "^1.7.0",
     "react": "^19.0.0",

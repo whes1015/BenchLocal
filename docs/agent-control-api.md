@@ -19,7 +19,7 @@ The feature should not turn BenchLocal into a general remote automation daemon. 
 
 ## Recommendation
 
-Use a local HTTP control API for commands and Server-Sent Events for live updates.
+Use a local HTTP control API for commands and Server-Sent Events for live updates. Also expose a standard MCP Streamable HTTP endpoint on the same local server so MCP-capable agents can discover BenchLocal resources and call BenchLocal tools directly.
 
 Do not use SSE as the full API. SSE is one-way and works well for progress streams, but commands should be normal HTTP requests with request IDs, response codes, and typed JSON responses.
 
@@ -60,6 +60,10 @@ app/src/main/
 
   agent-server.ts
     Local HTTP + SSE adapter to controller methods.
+    Hosts /mcp as an MCP Streamable HTTP adapter over the same controller.
+
+  agent-mcp.ts
+    MCP resources, prompts, and benchlocal_* tools backed by controller methods.
 
 packages/benchlocal-core/
   agent-protocol.ts
@@ -217,6 +221,35 @@ Long-running operations that currently return a final summary can keep doing so 
 ```http
 POST /v1/models/availability/refresh
 ```
+
+## MCP Surface
+
+```http
+POST /mcp
+Authorization: Bearer <token>
+Accept: application/json, text/event-stream
+Content-Type: application/json
+```
+
+The MCP endpoint uses the official Streamable HTTP transport. It is stateless: commands that start long-running work return an accepted result while progress remains visible in the UI and can be polled through recent events.
+
+Resources:
+
+- `benchlocal://agent/guide`
+- `benchlocal://agent/openapi`
+- `benchlocal://state/config`
+- `benchlocal://state/workspaces`
+- `benchlocal://state/benchpacks`
+- `benchlocal://state/providers`
+- `benchlocal://state/models`
+- `benchlocal://state/runs/active`
+- `benchlocal://state/events/recent`
+
+Tools are prefixed with `benchlocal_` and cover config reads, provider/model CRUD, tab setup, model availability, run start/resume/stop/retry, run history reads, verifier status, and recent event polling.
+
+Prompt:
+
+- `benchlocal-run-benchpack`
 
 This is important for the local-model flow. The agent can:
 

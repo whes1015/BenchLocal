@@ -8484,7 +8484,9 @@ function AgentAccessView({
   };
   const agentGuideUrl = state?.baseUrl ? `${state.baseUrl}/v1/agent-guide` : "";
   const openApiUrl = state?.baseUrl ? `${state.baseUrl}/v1/openapi.json` : "";
+  const mcpUrl = state?.baseUrl ? `${state.baseUrl}/mcp` : "";
   const httpEndpoints = [
+    ["POST", "/mcp"],
     ["GET", "/v1/health"],
     ["GET", "/v1/agent-guide"],
     ["GET", "/v1/openapi.json"],
@@ -8579,6 +8581,14 @@ function AgentAccessView({
           </button>
         </div>
 
+        <div className="agent-field-row">
+          <Field label="MCP URL" value={mcpUrl} readOnly onChange={() => undefined} />
+          <button type="button" className="ghost-button ghost-button-compact" onClick={() => copyText(mcpUrl)} disabled={!mcpUrl}>
+            <Copy size={14} />
+            Copy
+          </button>
+        </div>
+
         {state?.message ? (
           <div className="helper-copy helper-copy-compact">
             <p>{state.message}</p>
@@ -8593,7 +8603,7 @@ function AgentAccessView({
         </div>
       </Panel>
 
-      <Panel title="HTTP Surface" subtitle="Command endpoints use JSON; live progress uses Server-Sent Events." tone="slate" icon={<Logs size={16} />}>
+      <Panel title="HTTP Surface" subtitle="Commands use JSON or MCP; live progress uses Server-Sent Events." tone="slate" icon={<Logs size={16} />}>
         <div className="agent-endpoint-list">
           {httpEndpoints.map(([method, path]) => (
             <div key={`${method}-${path}`} className="agent-endpoint-row">
