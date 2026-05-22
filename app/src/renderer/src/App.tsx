@@ -985,23 +985,32 @@ function drawShareCardCanvas(
   ctx.font = `800 18px ${monoFont}`;
   ctx.fillStyle = palette.accentStrong;
   ctx.fillText("SCORE", 110, 394);
-  const outcomeTone =
-    data.statusCounts.fail > 0 ? palette.fail
-    : data.statusCounts.partial > 0 ? palette.partial
-    : palette.pass;
-  ctx.font = `800 17px ${displayFont}`;
-  const outcomePillWidth = Math.max(82, ctx.measureText(data.outcomeLabel).width + 24);
-  const outcomePillX = 396 - outcomePillWidth;
-  fillRoundedRect(ctx, outcomePillX, 374, outcomePillWidth, 26, 13, "rgba(255, 255, 255, 0.08)");
-  strokeRoundedRect(ctx, outcomePillX, 374, outcomePillWidth, 26, 13, "rgba(255, 255, 255, 0.16)", 1);
-  ctx.fillStyle = outcomeTone;
-  ctx.fillText(data.outcomeLabel, outcomePillX + 12, 393);
-  ctx.font = `900 82px ${displayFont}`;
-  ctx.fillStyle = palette.text;
-  ctx.fillText(data.scoreValue, 108, 496);
-  ctx.font = `760 22px ${displayFont}`;
+  ctx.font = `760 24px ${displayFont}`;
   ctx.fillStyle = palette.muted;
-  ctx.fillText(`${data.completedCount}/${data.scenarioCount} results`, 254, 496);
+  ctx.fillText(`${data.completedCount}/${data.scenarioCount}`, 110, 430);
+  const scorePanelTop = 356;
+  const scorePanelHeight = 164;
+  const scoreTextMaxWidth = 188;
+  let scoreFontSize = 142;
+  let scoreMetrics: TextMetrics;
+  let scoreTextAscent = 0;
+  let scoreTextDescent = 0;
+  do {
+    ctx.font = `900 ${scoreFontSize}px ${displayFont}`;
+    scoreMetrics = ctx.measureText(data.scoreValue);
+    scoreTextAscent = scoreMetrics.actualBoundingBoxAscent || scoreFontSize * 0.72;
+    scoreTextDescent = scoreMetrics.actualBoundingBoxDescent || scoreFontSize * 0.22;
+    if (scoreMetrics.width <= scoreTextMaxWidth && scoreTextAscent + scoreTextDescent <= scorePanelHeight - 26) {
+      break;
+    }
+    scoreFontSize -= 2;
+  } while (scoreFontSize > 90);
+  const scoreTextCenterY = scorePanelTop + scorePanelHeight / 2;
+  const scoreBaselineY = scoreTextCenterY + (scoreTextAscent - scoreTextDescent) / 2;
+  ctx.fillStyle = palette.text;
+  ctx.textAlign = "right";
+  ctx.fillText(data.scoreValue, 396, scoreBaselineY);
+  ctx.textAlign = "left";
 
   const segments = [
     { label: "Pass", count: data.statusCounts.pass, color: palette.pass },
