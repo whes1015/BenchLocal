@@ -1585,15 +1585,6 @@ pre {
   white-space: nowrap;
 }
 
-.share-card-feedback {
-  border-radius: 12px;
-  padding: 10px 12px;
-  background: var(--neutral-soft);
-  color: var(--muted);
-  font-size: 0.82rem;
-  font-weight: 600;
-}
-
 .table-scroll {
   display: block;
   overflow-x: auto;

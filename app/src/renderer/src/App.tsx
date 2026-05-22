@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import benchlocalIcon from "../../../assets/benchlocal-icon.png";
 import benchlocalIconOutline from "../../../assets/benchlocal-icon-outline.png";
+import shareCardDisplayFontUrl from "./assets/fonts/InterVariable.woff2";
+import shareCardMonoFontUrl from "./assets/fonts/JetBrainsMonoVariable.woff2";
 import {
   ArrowRight,
   ArrowUp,
@@ -347,8 +349,6 @@ type ShareCardStatusCounts = {
   pass: number;
   partial: number;
   fail: number;
-  providerError: number;
-  missing: number;
 };
 
 type ResultShareCardData = {
@@ -365,7 +365,7 @@ type ResultShareCardData = {
   runsPerTest: number;
   runDateLabel: string;
   durationLabel: string | null;
-  versionLabel: string;
+  footerLabel: string;
   outcomeLabel: string;
   fileName: string;
 };
@@ -378,6 +378,8 @@ const SHARE_CARD_HEIGHT = 630;
 const SHARE_CARD_EXPORT_SCALE = 2;
 const SHARE_CARD_PIXEL_WIDTH = SHARE_CARD_WIDTH * SHARE_CARD_EXPORT_SCALE;
 const SHARE_CARD_PIXEL_HEIGHT = SHARE_CARD_HEIGHT * SHARE_CARD_EXPORT_SCALE;
+const SHARE_CARD_DISPLAY_FONT_FAMILY = "BenchLocal Share Inter";
+const SHARE_CARD_MONO_FONT_FAMILY = "BenchLocal Share JetBrains Mono";
 
 function isAbortLikeError(error: unknown): boolean {
   return error instanceof Error && /abort|cancel/i.test(error.name + " " + error.message);
@@ -566,14 +568,12 @@ function countShareStatuses(results: ScenarioResult[], scenarioCount: number): S
   const counts: ShareCardStatusCounts = {
     pass: 0,
     partial: 0,
-    fail: 0,
-    providerError: 0,
-    missing: 0
+    fail: 0
   };
 
   for (const result of results) {
     if (isProviderErrorResult(result)) {
-      counts.providerError += 1;
+      counts.fail += 1;
     } else if (result.status === "pass") {
       counts.pass += 1;
     } else if (result.status === "partial") {
@@ -583,21 +583,13 @@ function countShareStatuses(results: ScenarioResult[], scenarioCount: number): S
     }
   }
 
-  counts.missing = Math.max(0, scenarioCount - results.length);
+  counts.fail += Math.max(0, scenarioCount - results.length);
   return counts;
 }
 
 function describeShareOutcome(counts: ShareCardStatusCounts, scenarioCount: number): string {
   if (scenarioCount > 0 && counts.pass === scenarioCount) {
     return "All passed";
-  }
-
-  if (counts.missing > 0) {
-    return `${counts.missing} not run`;
-  }
-
-  if (counts.providerError > 0) {
-    return `${counts.providerError} provider error${counts.providerError === 1 ? "" : "s"}`;
   }
 
   if (counts.fail > 0) {
@@ -616,15 +608,13 @@ function buildResultShareCardData({
   model,
   providers,
   score,
-  runModeLabel,
-  appVersion
+  runModeLabel
 }: {
   runSummary: BenchPackRunSummary;
   model: ResolvedTabModel | undefined;
   providers: Record<string, BenchLocalProviderConfig>;
   score: BenchPackRunSummary["scores"][string];
   runModeLabel: string;
-  appVersion?: string | null;
 }): ResultShareCardData {
   const modelId = model?.id ?? "model";
   const results = runSummary.resultsByModel[modelId] ?? [];
@@ -659,7 +649,7 @@ function buildResultShareCardData({
     runsPerTest: normalizeRunsPerTest(runSummary.runsPerTest),
     runDateLabel: formatShareDate(runSummary.startedAt),
     durationLabel,
-    versionLabel: appVersion?.trim() ? `v${appVersion.trim()}` : "BenchLocal",
+    footerLabel: "benchlocal.com",
     outcomeLabel: describeShareOutcome(statusCounts, scenarioCount),
     fileName: `${sanitizeShareFileName(`benchlocal-${benchPackName}-${modelLabel}`)}.png`
   };
@@ -718,6 +708,7 @@ function strokeRoundedRect(
 }
 
 let shareCardLogoImagePromise: Promise<HTMLImageElement | null> | null = null;
+let shareCardFontsPromise: Promise<void> | null = null;
 
 function loadShareCardLogoImage(): Promise<HTMLImageElement | null> {
   shareCardLogoImagePromise ??= new Promise((resolve) => {
@@ -740,6 +731,36 @@ function loadShareCardLogoImage(): Promise<HTMLImageElement | null> {
   });
 
   return shareCardLogoImagePromise;
+}
+
+function loadShareCardFonts(): Promise<void> {
+  if (typeof document === "undefined" || typeof FontFace === "undefined") {
+    return Promise.resolve();
+  }
+
+  shareCardFontsPromise ??= Promise.all([
+    {
+      family: SHARE_CARD_DISPLAY_FONT_FAMILY,
+      url: shareCardDisplayFontUrl
+    },
+    {
+      family: SHARE_CARD_MONO_FONT_FAMILY,
+      url: shareCardMonoFontUrl
+    }
+  ].map(async ({ family, url }) => {
+    if (document.fonts.check(`16px "${family}"`)) {
+      return;
+    }
+
+    const font = new FontFace(family, `url("${url}") format("woff2")`, {
+      display: "block",
+      style: "normal",
+      weight: "100 900"
+    });
+    (document.fonts as FontFaceSet & { add(font: FontFace): void }).add(await font.load());
+  })).then(() => document.fonts.ready).then(() => undefined);
+
+  return shareCardFontsPromise;
 }
 
 function drawShareCardLogo(
@@ -860,48 +881,79 @@ function drawShareCardCanvas(
   canvas.height = SHARE_CARD_PIXEL_HEIGHT;
   ctx.setTransform(SHARE_CARD_EXPORT_SCALE, 0, 0, SHARE_CARD_EXPORT_SCALE, 0, 0);
 
-  const displayFont =
-    '"SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-  const monoFont = '"SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+  const displayFont = `"${SHARE_CARD_DISPLAY_FONT_FAMILY}", sans-serif`;
+  const monoFont = `"${SHARE_CARD_MONO_FONT_FAMILY}", monospace`;
   const palette = {
-    bg: "#11100d",
-    panel: "#1b1914",
-    panelStrong: "#242118",
-    border: "#393427",
-    text: "#f8f3e3",
-    muted: "#b8ad96",
-    faint: "#776d5b",
-    accent: "#f2b84b",
-    accentStrong: "#ffd36a",
+    bg: "#030303",
+    panel: "#101010",
+    panelStrong: "#171717",
+    border: "#333333",
+    text: "#f7f7f3",
+    muted: "#b8b8ae",
+    faint: "#77776f",
+    accent: "#f4f4ec",
+    accentStrong: "#ffffff",
     pass: "#47d16c",
-    partial: "#f2b84b",
-    fail: "#ef6262",
-    provider: "#d99b2b",
-    missing: "#5f5a50"
+    partial: "#cfcfc7",
+    fail: "#ef6262"
   };
 
-  ctx.fillStyle = palette.bg;
+  const backgroundGradient = ctx.createRadialGradient(940, 70, 18, 610, 280, 820);
+  backgroundGradient.addColorStop(0, "#6a6a6a");
+  backgroundGradient.addColorStop(0.16, "#343434");
+  backgroundGradient.addColorStop(0.42, "#111111");
+  backgroundGradient.addColorStop(1, palette.bg);
+  ctx.fillStyle = backgroundGradient;
+  ctx.fillRect(0, 0, SHARE_CARD_WIDTH, SHARE_CARD_HEIGHT);
+  const upperGlow = ctx.createRadialGradient(846, 88, 8, 846, 88, 410);
+  upperGlow.addColorStop(0, "rgba(255, 255, 255, 0.18)");
+  upperGlow.addColorStop(0.36, "rgba(255, 255, 255, 0.055)");
+  upperGlow.addColorStop(1, "rgba(255, 255, 255, 0)");
+  ctx.fillStyle = upperGlow;
+  ctx.fillRect(0, 0, SHARE_CARD_WIDTH, SHARE_CARD_HEIGHT);
+  const lowerGlow = ctx.createRadialGradient(278, 542, 18, 278, 542, 540);
+  lowerGlow.addColorStop(0, "rgba(255, 255, 255, 0.10)");
+  lowerGlow.addColorStop(0.46, "rgba(255, 255, 255, 0.024)");
+  lowerGlow.addColorStop(1, "rgba(255, 255, 255, 0)");
+  ctx.fillStyle = lowerGlow;
   ctx.fillRect(0, 0, SHARE_CARD_WIDTH, SHARE_CARD_HEIGHT);
 
-  ctx.fillStyle = "#15130f";
-  ctx.fillRect(0, 0, SHARE_CARD_WIDTH, SHARE_CARD_HEIGHT);
-  ctx.strokeStyle = "rgba(242, 184, 75, 0.08)";
+  const panelX = 36;
+  const panelY = 36;
+  const panelWidth = SHARE_CARD_WIDTH - 72;
+  const panelHeight = SHARE_CARD_HEIGHT - 72;
+  ctx.save();
+  drawRoundedRect(ctx, panelX, panelY, panelWidth, panelHeight, 34);
+  ctx.clip();
+  const panelGradient = ctx.createRadialGradient(880, 76, 80, 540, 324, 760);
+  panelGradient.addColorStop(0, "#3a3a3a");
+  panelGradient.addColorStop(0.22, "#1f1f1f");
+  panelGradient.addColorStop(0.52, palette.panel);
+  panelGradient.addColorStop(1, "#070707");
+  ctx.fillStyle = panelGradient;
+  ctx.fillRect(panelX, panelY, panelWidth, panelHeight);
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.045)";
   ctx.lineWidth = 1;
-  for (let x = -SHARE_CARD_HEIGHT; x < SHARE_CARD_WIDTH; x += 48) {
+  for (let x = panelX + 58; x < panelX + panelWidth; x += 64) {
     ctx.beginPath();
-    ctx.moveTo(x, SHARE_CARD_HEIGHT);
-    ctx.lineTo(x + SHARE_CARD_HEIGHT, 0);
+    ctx.moveTo(x, panelY);
+    ctx.lineTo(x, panelY + panelHeight);
     ctx.stroke();
   }
-
-  fillRoundedRect(ctx, 36, 36, SHARE_CARD_WIDTH - 72, SHARE_CARD_HEIGHT - 72, 34, palette.panel);
-  strokeRoundedRect(ctx, 36, 36, SHARE_CARD_WIDTH - 72, SHARE_CARD_HEIGHT - 72, 34, "rgba(242, 184, 75, 0.24)", 2);
+  for (let y = panelY + 58; y < panelY + panelHeight; y += 64) {
+    ctx.beginPath();
+    ctx.moveTo(panelX, y);
+    ctx.lineTo(panelX + panelWidth, y);
+    ctx.stroke();
+  }
+  ctx.restore();
+  strokeRoundedRect(ctx, panelX, panelY, panelWidth, panelHeight, 34, "rgba(255, 255, 255, 0.26)", 1.5);
   ctx.fillStyle = palette.accent;
   ctx.fillRect(36, 146, 7, 400);
   ctx.beginPath();
   ctx.moveTo(36, 546);
   ctx.lineTo(SHARE_CARD_WIDTH - 36, 546);
-  ctx.strokeStyle = "rgba(242, 184, 75, 0.58)";
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
   ctx.lineWidth = 0.55;
   ctx.stroke();
 
@@ -913,34 +965,35 @@ function drawShareCardCanvas(
   ctx.fillText("BenchLocal", 136, 87);
   ctx.textBaseline = "alphabetic";
 
-  ctx.font = `800 18px ${monoFont}`;
+  ctx.font = `900 22px ${monoFont}`;
   const packLabel = truncateCanvasText(ctx, data.benchPackName.toUpperCase(), 360);
-  const packWidth = Math.max(176, ctx.measureText(packLabel).width + 46);
-  fillRoundedRect(ctx, SHARE_CARD_WIDTH - 78 - packWidth, 64, packWidth, 44, 22, palette.panelStrong);
-  strokeRoundedRect(ctx, SHARE_CARD_WIDTH - 78 - packWidth, 64, packWidth, 44, 22, palette.border, 1);
+  const packWidth = Math.max(190, ctx.measureText(packLabel).width + 58);
+  const packX = SHARE_CARD_WIDTH - 78 - packWidth;
+  fillRoundedRect(ctx, packX, 62, packWidth, 48, 24, palette.panelStrong);
+  strokeRoundedRect(ctx, packX, 62, packWidth, 48, 24, palette.border, 1);
   ctx.fillStyle = palette.accentStrong;
-  ctx.fillText(packLabel, SHARE_CARD_WIDTH - 78 - packWidth + 23, 93);
+  ctx.textAlign = "center";
+  ctx.fillText(packLabel, packX + packWidth / 2, 94);
+  ctx.textAlign = "left";
 
   ctx.font = `900 70px ${displayFont}`;
   ctx.fillStyle = palette.text;
   drawWrappedCanvasText(ctx, data.modelLabel, 78, 205, 970, 76, 2);
 
   fillRoundedRect(ctx, 78, 356, 350, 164, 26, palette.panelStrong);
-  strokeRoundedRect(ctx, 78, 356, 350, 164, 26, "rgba(242, 184, 75, 0.28)", 1.5);
+  strokeRoundedRect(ctx, 78, 356, 350, 164, 26, "rgba(255, 255, 255, 0.18)", 1.5);
   ctx.font = `800 18px ${monoFont}`;
   ctx.fillStyle = palette.accentStrong;
   ctx.fillText("SCORE", 110, 394);
   const outcomeTone =
     data.statusCounts.fail > 0 ? palette.fail
-    : data.statusCounts.providerError > 0 ? palette.provider
-    : data.statusCounts.missing > 0 ? palette.missing
     : data.statusCounts.partial > 0 ? palette.partial
     : palette.pass;
   ctx.font = `800 17px ${displayFont}`;
   const outcomePillWidth = Math.max(82, ctx.measureText(data.outcomeLabel).width + 24);
   const outcomePillX = 396 - outcomePillWidth;
-  fillRoundedRect(ctx, outcomePillX, 374, outcomePillWidth, 26, 13, "rgba(242, 184, 75, 0.10)");
-  strokeRoundedRect(ctx, outcomePillX, 374, outcomePillWidth, 26, 13, "rgba(242, 184, 75, 0.20)", 1);
+  fillRoundedRect(ctx, outcomePillX, 374, outcomePillWidth, 26, 13, "rgba(255, 255, 255, 0.08)");
+  strokeRoundedRect(ctx, outcomePillX, 374, outcomePillWidth, 26, 13, "rgba(255, 255, 255, 0.16)", 1);
   ctx.fillStyle = outcomeTone;
   ctx.fillText(data.outcomeLabel, outcomePillX + 12, 393);
   ctx.font = `900 82px ${displayFont}`;
@@ -953,15 +1006,13 @@ function drawShareCardCanvas(
   const segments = [
     { label: "Pass", count: data.statusCounts.pass, color: palette.pass },
     { label: "Partial", count: data.statusCounts.partial, color: palette.partial },
-    { label: "Fail", count: data.statusCounts.fail, color: palette.fail },
-    { label: "Provider", count: data.statusCounts.providerError, color: palette.provider },
-    { label: "Missing", count: data.statusCounts.missing, color: palette.missing }
+    { label: "Fail", count: data.statusCounts.fail, color: palette.fail }
   ];
   const barX = 480;
   const barY = 356;
   const barWidth = 636;
   const barHeight = 20;
-  fillRoundedRect(ctx, barX, barY, barWidth, barHeight, 10, "#2b281f");
+  fillRoundedRect(ctx, barX, barY, barWidth, barHeight, 10, "#242424");
 
   let offset = 0;
   const total = Math.max(1, data.scenarioCount);
@@ -996,38 +1047,74 @@ function drawShareCardCanvas(
 
   ctx.font = `760 20px ${displayFont}`;
   const chipStartX = 480;
+  const chipAreaWidth = 636;
   const chipRows = [472, 508];
-  const chipColumns = 5;
   const chipGap = 9;
   const chipHeight = 30;
-  const chipWidth = 120;
-  const maxCategoryChips = chipRows.length * chipColumns;
-  const visibleCategoryCount =
-    data.categories.length > maxCategoryChips ? maxCategoryChips - 1 : maxCategoryChips;
-  const categoryChips = data.categories.slice(0, visibleCategoryCount).map((category) => ({
-    label: `${category.id}: ${category.score}`,
-    overflow: false
-  }));
+  const chipPaddingX = 28;
+  const chipMinWidth = 78;
+  const chipMaxWidth = 220;
+  const measureCategoryChipWidth = (label: string) =>
+    Math.min(chipMaxWidth, Math.max(chipMinWidth, Math.ceil(ctx.measureText(label).width) + chipPaddingX));
+  const layoutCategoryChips = (chips: Array<{ label: string; overflow: boolean }>) => {
+    const layouts: Array<{ label: string; overflow: boolean; x: number; y: number; width: number }> = [];
+    let row = 0;
+    let x = chipStartX;
 
-  if (data.categories.length > visibleCategoryCount) {
-    categoryChips.push({
-      label: `+${data.categories.length - visibleCategoryCount} more`,
-      overflow: true
-    });
+    for (const chip of chips) {
+      const width = measureCategoryChipWidth(chip.label);
+
+      if (x > chipStartX && x + width > chipStartX + chipAreaWidth) {
+        row += 1;
+        x = chipStartX;
+      }
+
+      if (row >= chipRows.length) {
+        return null;
+      }
+
+      layouts.push({
+        ...chip,
+        x,
+        y: chipRows[row],
+        width
+      });
+      x += width + chipGap;
+    }
+
+    return layouts;
+  };
+
+  let visibleCategoryCount = data.categories.length;
+  let categoryChipLayouts: ReturnType<typeof layoutCategoryChips> = null;
+
+  while (visibleCategoryCount >= 0 && !categoryChipLayouts) {
+    const categoryChips = data.categories.slice(0, visibleCategoryCount).map((category) => ({
+      label: `${category.id}: ${category.score}`,
+      overflow: false
+    }));
+
+    if (visibleCategoryCount < data.categories.length) {
+      categoryChips.push({
+        label: `+${data.categories.length - visibleCategoryCount} more`,
+        overflow: true
+      });
+    }
+
+    categoryChipLayouts = layoutCategoryChips(categoryChips);
+    visibleCategoryCount -= 1;
   }
 
   const drawCategoryChip = (label: string, x: number, y: number, width: number, overflow = false) => {
-    fillRoundedRect(ctx, x, y, width, chipHeight, 15, overflow ? "#332d1d" : "#282419");
-    strokeRoundedRect(ctx, x, y, width, chipHeight, 15, "rgba(242, 184, 75, 0.18)", 1);
+    fillRoundedRect(ctx, x, y, width, chipHeight, 15, overflow ? "#202020" : "#181818");
+    strokeRoundedRect(ctx, x, y, width, chipHeight, 15, "rgba(255, 255, 255, 0.14)", 1);
     ctx.fillStyle = overflow ? palette.accentStrong : palette.text;
     ctx.fillText(label, x + 14, y + 21);
   };
 
-  categoryChips.forEach((chip, index) => {
-    const row = Math.floor(index / chipColumns);
-    const column = index % chipColumns;
-    const label = truncateCanvasText(ctx, chip.label, chipWidth - 28);
-    drawCategoryChip(label, chipStartX + column * (chipWidth + chipGap), chipRows[row], chipWidth, chip.overflow);
+  categoryChipLayouts?.forEach((chip) => {
+    const label = truncateCanvasText(ctx, chip.label, chip.width - chipPaddingX);
+    drawCategoryChip(label, chip.x, chip.y, chip.width, chip.overflow);
   });
 
   ctx.font = `700 18px ${displayFont}`;
@@ -1044,14 +1131,15 @@ function drawShareCardCanvas(
   ctx.font = `800 18px ${monoFont}`;
   ctx.fillStyle = palette.accentStrong;
   ctx.textAlign = "right";
-  ctx.fillText(data.versionLabel, SHARE_CARD_WIDTH - 78, 570);
+  ctx.fillText(data.footerLabel, SHARE_CARD_WIDTH - 78, 570);
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
 }
 
 async function createShareCardBlob(data: ResultShareCardData): Promise<Blob> {
   const canvas = document.createElement("canvas");
-  drawShareCardCanvas(canvas, data, await loadShareCardLogoImage());
+  const [, logoImage] = await Promise.all([loadShareCardFonts(), loadShareCardLogoImage()]);
+  drawShareCardCanvas(canvas, data, logoImage);
 
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
@@ -5657,7 +5745,6 @@ export function App() {
                             modelAvailabilityById={modelAvailabilityById}
                             checkingModelAvailability={checkingModelAvailability}
                             providers={draft.providers}
-                            appVersion={appMetadata?.version}
 	                            runSummary={activeRunSummary}
                               historyEntries={runHistories[activeInspection.id] ?? []}
 	                            liveRun={activeLiveRun}
@@ -6702,7 +6789,6 @@ function BenchmarkSection({
   modelAvailabilityById,
   checkingModelAvailability,
   providers,
-  appVersion,
   runSummary,
   historyEntries,
   liveRun,
@@ -6738,7 +6824,6 @@ function BenchmarkSection({
   modelAvailabilityById: Record<string, ModelAvailability>;
   checkingModelAvailability: Record<string, true>;
   providers: Record<string, BenchLocalProviderConfig>;
-  appVersion?: string | null;
   runSummary: BenchPackRunSummary | null;
   historyEntries: BenchPackRunHistoryEntry[];
   liveRun: LiveRunState | null;
@@ -7489,8 +7574,7 @@ function BenchmarkSection({
                   model,
                   providers,
                   score,
-                  runModeLabel: shareRunModeLabel,
-                  appVersion
+                  runModeLabel: shareRunModeLabel
                 });
                 const providerName = model ? getProviderDisplayName(providers, model.provider) : "";
                 const modelName = model?.model?.trim();
@@ -7549,7 +7633,6 @@ function ResultShareCardModal({
   onClose: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -7559,10 +7642,15 @@ function ResultShareCardModal({
       return;
     }
 
-    drawShareCardCanvas(canvas, data);
-    void loadShareCardLogoImage().then((logoImage) => {
+    void Promise.all([loadShareCardFonts(), loadShareCardLogoImage()]).then(([, logoImage]) => {
       if (!cancelled && canvasRef.current) {
         drawShareCardCanvas(canvasRef.current, data, logoImage);
+      }
+    }).catch((error) => {
+      console.error(error);
+
+      if (!cancelled && canvasRef.current) {
+        drawShareCardCanvas(canvasRef.current, data);
       }
     });
 
@@ -7581,7 +7669,6 @@ function ResultShareCardModal({
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    setStatus("PNG saved.");
   };
 
   const copyImage = async () => {
@@ -7589,13 +7676,11 @@ function ResultShareCardModal({
     const clipboardItem = (window as typeof window & { ClipboardItem?: ClipboardItemConstructor }).ClipboardItem;
 
     if (!navigator.clipboard?.write || !clipboardItem) {
-      setStatus("Image copy is unavailable in this environment. Save the PNG instead.");
       return;
     }
 
     const blob = await createShareCardBlob(data);
     await navigator.clipboard.write([new clipboardItem({ "image/png": blob })]);
-    setStatus("Copied image to clipboard.");
   };
 
   return (
@@ -7603,14 +7688,14 @@ function ResultShareCardModal({
       title="Share Result Card"
       subtitle="Preview a social-ready PNG for this model result."
       onClose={onClose}
-      onSubmit={() => void savePng().catch((error) => setStatus(error instanceof Error ? error.message : "Failed to save PNG."))}
+      onSubmit={() => void savePng().catch((error) => console.error(error))}
       submitLabel="Save PNG"
       size="wide"
       leadingActions={
         <button
           type="button"
           className="ghost-button"
-          onClick={() => void copyImage().catch((error) => setStatus(error instanceof Error ? error.message : "Failed to copy image."))}
+          onClick={() => void copyImage().catch((error) => console.error(error))}
         >
           <Copy size={14} />
           Copy Image
@@ -7643,7 +7728,6 @@ function ResultShareCardModal({
             <span className="share-card-meta-value">{data.fileName}</span>
           </div>
         </div>
-        {status ? <div className="share-card-feedback">{status}</div> : null}
       </div>
     </Modal>
   );
