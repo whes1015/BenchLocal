@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import benchlocalIcon from "../../../assets/benchlocal-icon.png";
+import benchlocalIconOutline from "../../../assets/benchlocal-icon-outline.png";
 import {
   ArrowRight,
   ArrowUp,
@@ -22,6 +23,7 @@ import {
   Plus,
   RotateCcw,
   Save,
+  Share2,
   Square,
   Server,
   Sidebar,
@@ -341,9 +343,41 @@ type BenchPackRunBlocker = {
   actionLabel: string;
 };
 
+type ShareCardStatusCounts = {
+  pass: number;
+  partial: number;
+  fail: number;
+  providerError: number;
+  missing: number;
+};
+
+type ResultShareCardData = {
+  benchPackName: string;
+  modelLabel: string;
+  providerName: string;
+  modelIdentifier: string;
+  scoreValue: string;
+  scenarioCount: number;
+  completedCount: number;
+  statusCounts: ShareCardStatusCounts;
+  categories: Array<{ id: string; label: string; score: string }>;
+  runModeLabel: string;
+  runsPerTest: number;
+  runDateLabel: string;
+  durationLabel: string | null;
+  versionLabel: string;
+  outcomeLabel: string;
+  fileName: string;
+};
+
 type BenchPackMutationState = BenchPackMutationProgress;
 const THIRD_PARTY_INSTALL_MUTATION_ID = "__third_party_install__";
 const DEFAULT_BENCHLOCAL_GENERATION: GenerationRequest = { request_timeout_seconds: 300 };
+const SHARE_CARD_WIDTH = 1200;
+const SHARE_CARD_HEIGHT = 630;
+const SHARE_CARD_EXPORT_SCALE = 2;
+const SHARE_CARD_PIXEL_WIDTH = SHARE_CARD_WIDTH * SHARE_CARD_EXPORT_SCALE;
+const SHARE_CARD_PIXEL_HEIGHT = SHARE_CARD_HEIGHT * SHARE_CARD_EXPORT_SCALE;
 
 function isAbortLikeError(error: unknown): boolean {
   return error instanceof Error && /abort|cancel/i.test(error.name + " " + error.message);
@@ -489,6 +523,546 @@ function getModelDisplayIdentifier(model: Pick<BenchLocalModelConfig, "id" | "mo
 function getModelLabelForMessage(modelId: string, models: ResolvedTabModel[]): string {
   const model = models.find((candidate) => candidate.id === modelId);
   return model?.displayLabel ?? model?.label ?? (modelId.split(":").slice(1).join(":").trim() || modelId);
+}
+
+function formatShareScore(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "0";
+  }
+
+  if (Number.isInteger(value)) {
+    return `${value}`;
+  }
+
+  return value.toFixed(2).replace(/\.?0+$/u, "");
+}
+
+function formatShareDate(value: string): string {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.valueOf())) {
+    return "Unknown date";
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function sanitizeShareFileName(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+    .slice(0, 80) || "benchlocal-result";
+}
+
+function countShareStatuses(results: ScenarioResult[], scenarioCount: number): ShareCardStatusCounts {
+  const counts: ShareCardStatusCounts = {
+    pass: 0,
+    partial: 0,
+    fail: 0,
+    providerError: 0,
+    missing: 0
+  };
+
+  for (const result of results) {
+    if (isProviderErrorResult(result)) {
+      counts.providerError += 1;
+    } else if (result.status === "pass") {
+      counts.pass += 1;
+    } else if (result.status === "partial") {
+      counts.partial += 1;
+    } else {
+      counts.fail += 1;
+    }
+  }
+
+  counts.missing = Math.max(0, scenarioCount - results.length);
+  return counts;
+}
+
+function describeShareOutcome(counts: ShareCardStatusCounts, scenarioCount: number): string {
+  if (scenarioCount > 0 && counts.pass === scenarioCount) {
+    return "All passed";
+  }
+
+  if (counts.missing > 0) {
+    return `${counts.missing} not run`;
+  }
+
+  if (counts.providerError > 0) {
+    return `${counts.providerError} provider error${counts.providerError === 1 ? "" : "s"}`;
+  }
+
+  if (counts.fail > 0) {
+    return `${counts.fail} failed`;
+  }
+
+  if (counts.partial > 0) {
+    return `${counts.partial} partial`;
+  }
+
+  return "Completed";
+}
+
+function buildResultShareCardData({
+  runSummary,
+  model,
+  providers,
+  score,
+  runModeLabel,
+  appVersion
+}: {
+  runSummary: BenchPackRunSummary;
+  model: ResolvedTabModel | undefined;
+  providers: Record<string, BenchLocalProviderConfig>;
+  score: BenchPackRunSummary["scores"][string];
+  runModeLabel: string;
+  appVersion?: string | null;
+}): ResultShareCardData {
+  const modelId = model?.id ?? "model";
+  const results = runSummary.resultsByModel[modelId] ?? [];
+  const scenarioCount = runSummary.scenarioCount;
+  const statusCounts = countShareStatuses(results, scenarioCount);
+  const providerName = model ? getProviderDisplayName(providers, model.provider) : "Unknown Provider";
+  const modelIdentifier = model ? getModelDisplayIdentifier(model) : modelId;
+  const startedAt = new Date(runSummary.startedAt);
+  const completedAt = new Date(runSummary.completedAt);
+  const durationLabel =
+    Number.isNaN(startedAt.valueOf()) || Number.isNaN(completedAt.valueOf())
+      ? null
+      : formatDurationMs(Math.max(0, completedAt.valueOf() - startedAt.valueOf()));
+  const benchPackName = runSummary.benchPackName || runSummary.benchPackId;
+  const modelLabel = model?.displayLabel ?? model?.label ?? modelIdentifier;
+
+  return {
+    benchPackName,
+    modelLabel,
+    providerName,
+    modelIdentifier,
+    scoreValue: formatShareScore(score.totalScore),
+    scenarioCount,
+    completedCount: results.length,
+    statusCounts,
+    categories: score.categories.map((category) => ({
+      id: category.id,
+      label: category.label,
+      score: formatShareScore(category.score)
+    })),
+    runModeLabel,
+    runsPerTest: normalizeRunsPerTest(runSummary.runsPerTest),
+    runDateLabel: formatShareDate(runSummary.startedAt),
+    durationLabel,
+    versionLabel: appVersion?.trim() ? `v${appVersion.trim()}` : "BenchLocal",
+    outcomeLabel: describeShareOutcome(statusCounts, scenarioCount),
+    fileName: `${sanitizeShareFileName(`benchlocal-${benchPackName}-${modelLabel}`)}.png`
+  };
+}
+
+function drawRoundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number
+): void {
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+  ctx.lineTo(x + r, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function fillRoundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+  color: string
+): void {
+  drawRoundedRect(ctx, x, y, width, height, radius);
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+function strokeRoundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+  color: string,
+  lineWidth = 1
+): void {
+  drawRoundedRect(ctx, x, y, width, height, radius);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth;
+  ctx.stroke();
+}
+
+let shareCardLogoImagePromise: Promise<HTMLImageElement | null> | null = null;
+
+function loadShareCardLogoImage(): Promise<HTMLImageElement | null> {
+  shareCardLogoImagePromise ??= new Promise((resolve) => {
+    const image = new Image();
+    let settled = false;
+    const finish = (value: HTMLImageElement | null) => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
+
+    image.onload = () => finish(image);
+    image.onerror = () => finish(null);
+    image.src = benchlocalIconOutline;
+
+    if (image.complete && image.naturalWidth > 0) {
+      finish(image);
+    }
+  });
+
+  return shareCardLogoImagePromise;
+}
+
+function drawShareCardLogo(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  logoImage?: HTMLImageElement | null
+): void {
+  fillRoundedRect(ctx, x, y, size, size, 12, "#0f2a3d");
+
+  if (logoImage) {
+    ctx.save();
+    drawRoundedRect(ctx, x, y, size, size, 12);
+    ctx.clip();
+    ctx.drawImage(logoImage, x, y, size, size);
+    ctx.restore();
+  } else {
+    strokeRoundedRect(ctx, x + 13, y + 13, size - 26, 7, 3, "#40a9ff", 2.5);
+    strokeRoundedRect(ctx, x + 13, y + 27, size - 26, 7, 3, "#40a9ff", 2.5);
+  }
+
+  strokeRoundedRect(ctx, x, y, size, size, 12, "rgba(255, 211, 106, 0.22)", 1);
+}
+
+function truncateCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
+  if (ctx.measureText(text).width <= maxWidth) {
+    return text;
+  }
+
+  const suffix = "...";
+  let next = text;
+
+  while (next.length > 0 && ctx.measureText(`${next}${suffix}`).width > maxWidth) {
+    next = next.slice(0, -1);
+  }
+
+  return next ? `${next}${suffix}` : suffix;
+}
+
+function getWrappedCanvasTextLines(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+  maxLines: number
+): string[] {
+  const lines: string[] = [];
+  let remaining = text.trim().replace(/\s+/gu, " ");
+
+  while (remaining && lines.length < maxLines) {
+    if (ctx.measureText(remaining).width <= maxWidth) {
+      lines.push(remaining);
+      break;
+    }
+
+    if (lines.length === maxLines - 1) {
+      lines.push(truncateCanvasText(ctx, remaining, maxWidth));
+      break;
+    }
+
+    let low = 1;
+    let high = remaining.length;
+    let fit = 1;
+
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const candidate = remaining.slice(0, mid);
+
+      if (ctx.measureText(candidate).width <= maxWidth) {
+        fit = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    const slice = remaining.slice(0, fit);
+    const breakMatches = [...slice.matchAll(/[ /_\-:.]/gu)];
+    const lastBreak = breakMatches.at(-1)?.index;
+    const breakIndex = lastBreak !== undefined && lastBreak > fit * 0.42 ? lastBreak + 1 : fit;
+    lines.push(remaining.slice(0, breakIndex).trimEnd());
+    remaining = remaining.slice(breakIndex).trimStart();
+  }
+
+  return lines;
+}
+
+function drawWrappedCanvasText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  lineHeight: number,
+  maxLines: number
+): number {
+  const visibleLines = getWrappedCanvasTextLines(ctx, text, maxWidth, maxLines);
+
+  visibleLines.forEach((line, index) => {
+    ctx.fillText(line, x, y + index * lineHeight);
+  });
+
+  return y + visibleLines.length * lineHeight;
+}
+
+function drawShareCardCanvas(
+  canvas: HTMLCanvasElement,
+  data: ResultShareCardData,
+  logoImage?: HTMLImageElement | null
+): void {
+  const ctx = canvas.getContext("2d");
+
+  if (!ctx) {
+    return;
+  }
+
+  canvas.width = SHARE_CARD_PIXEL_WIDTH;
+  canvas.height = SHARE_CARD_PIXEL_HEIGHT;
+  ctx.setTransform(SHARE_CARD_EXPORT_SCALE, 0, 0, SHARE_CARD_EXPORT_SCALE, 0, 0);
+
+  const displayFont =
+    '"SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  const monoFont = '"SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+  const palette = {
+    bg: "#11100d",
+    panel: "#1b1914",
+    panelStrong: "#242118",
+    border: "#393427",
+    text: "#f8f3e3",
+    muted: "#b8ad96",
+    faint: "#776d5b",
+    accent: "#f2b84b",
+    accentStrong: "#ffd36a",
+    pass: "#47d16c",
+    partial: "#f2b84b",
+    fail: "#ef6262",
+    provider: "#d99b2b",
+    missing: "#5f5a50"
+  };
+
+  ctx.fillStyle = palette.bg;
+  ctx.fillRect(0, 0, SHARE_CARD_WIDTH, SHARE_CARD_HEIGHT);
+
+  ctx.fillStyle = "#15130f";
+  ctx.fillRect(0, 0, SHARE_CARD_WIDTH, SHARE_CARD_HEIGHT);
+  ctx.strokeStyle = "rgba(242, 184, 75, 0.08)";
+  ctx.lineWidth = 1;
+  for (let x = -SHARE_CARD_HEIGHT; x < SHARE_CARD_WIDTH; x += 48) {
+    ctx.beginPath();
+    ctx.moveTo(x, SHARE_CARD_HEIGHT);
+    ctx.lineTo(x + SHARE_CARD_HEIGHT, 0);
+    ctx.stroke();
+  }
+
+  fillRoundedRect(ctx, 36, 36, SHARE_CARD_WIDTH - 72, SHARE_CARD_HEIGHT - 72, 34, palette.panel);
+  strokeRoundedRect(ctx, 36, 36, SHARE_CARD_WIDTH - 72, SHARE_CARD_HEIGHT - 72, 34, "rgba(242, 184, 75, 0.24)", 2);
+  ctx.fillStyle = palette.accent;
+  ctx.fillRect(36, 146, 7, 400);
+  ctx.beginPath();
+  ctx.moveTo(36, 546);
+  ctx.lineTo(SHARE_CARD_WIDTH - 36, 546);
+  ctx.strokeStyle = "rgba(242, 184, 75, 0.58)";
+  ctx.lineWidth = 0.55;
+  ctx.stroke();
+
+  drawShareCardLogo(ctx, 78, 65, 44, logoImage);
+
+  ctx.font = `800 34px ${displayFont}`;
+  ctx.fillStyle = palette.text;
+  ctx.textBaseline = "middle";
+  ctx.fillText("BenchLocal", 136, 87);
+  ctx.textBaseline = "alphabetic";
+
+  ctx.font = `800 18px ${monoFont}`;
+  const packLabel = truncateCanvasText(ctx, data.benchPackName.toUpperCase(), 360);
+  const packWidth = Math.max(176, ctx.measureText(packLabel).width + 46);
+  fillRoundedRect(ctx, SHARE_CARD_WIDTH - 78 - packWidth, 64, packWidth, 44, 22, palette.panelStrong);
+  strokeRoundedRect(ctx, SHARE_CARD_WIDTH - 78 - packWidth, 64, packWidth, 44, 22, palette.border, 1);
+  ctx.fillStyle = palette.accentStrong;
+  ctx.fillText(packLabel, SHARE_CARD_WIDTH - 78 - packWidth + 23, 93);
+
+  ctx.font = `900 70px ${displayFont}`;
+  ctx.fillStyle = palette.text;
+  drawWrappedCanvasText(ctx, data.modelLabel, 78, 205, 970, 76, 2);
+
+  fillRoundedRect(ctx, 78, 356, 350, 164, 26, palette.panelStrong);
+  strokeRoundedRect(ctx, 78, 356, 350, 164, 26, "rgba(242, 184, 75, 0.28)", 1.5);
+  ctx.font = `800 18px ${monoFont}`;
+  ctx.fillStyle = palette.accentStrong;
+  ctx.fillText("SCORE", 110, 394);
+  const outcomeTone =
+    data.statusCounts.fail > 0 ? palette.fail
+    : data.statusCounts.providerError > 0 ? palette.provider
+    : data.statusCounts.missing > 0 ? palette.missing
+    : data.statusCounts.partial > 0 ? palette.partial
+    : palette.pass;
+  ctx.font = `800 17px ${displayFont}`;
+  const outcomePillWidth = Math.max(82, ctx.measureText(data.outcomeLabel).width + 24);
+  const outcomePillX = 396 - outcomePillWidth;
+  fillRoundedRect(ctx, outcomePillX, 374, outcomePillWidth, 26, 13, "rgba(242, 184, 75, 0.10)");
+  strokeRoundedRect(ctx, outcomePillX, 374, outcomePillWidth, 26, 13, "rgba(242, 184, 75, 0.20)", 1);
+  ctx.fillStyle = outcomeTone;
+  ctx.fillText(data.outcomeLabel, outcomePillX + 12, 393);
+  ctx.font = `900 82px ${displayFont}`;
+  ctx.fillStyle = palette.text;
+  ctx.fillText(data.scoreValue, 108, 496);
+  ctx.font = `760 22px ${displayFont}`;
+  ctx.fillStyle = palette.muted;
+  ctx.fillText(`${data.completedCount}/${data.scenarioCount} results`, 254, 496);
+
+  const segments = [
+    { label: "Pass", count: data.statusCounts.pass, color: palette.pass },
+    { label: "Partial", count: data.statusCounts.partial, color: palette.partial },
+    { label: "Fail", count: data.statusCounts.fail, color: palette.fail },
+    { label: "Provider", count: data.statusCounts.providerError, color: palette.provider },
+    { label: "Missing", count: data.statusCounts.missing, color: palette.missing }
+  ];
+  const barX = 480;
+  const barY = 356;
+  const barWidth = 636;
+  const barHeight = 20;
+  fillRoundedRect(ctx, barX, barY, barWidth, barHeight, 10, "#2b281f");
+
+  let offset = 0;
+  const total = Math.max(1, data.scenarioCount);
+  for (const segment of segments) {
+    if (segment.count <= 0) {
+      continue;
+    }
+
+    const segmentWidth = Math.max(segment.count > 0 ? 5 : 0, Math.round((segment.count / total) * barWidth));
+    const visibleWidth = Math.max(0, Math.min(segmentWidth, barWidth - offset));
+    ctx.fillStyle = segment.color;
+    ctx.fillRect(barX + offset, barY, visibleWidth, barHeight);
+    offset += segmentWidth;
+  }
+
+  strokeRoundedRect(ctx, barX, barY, barWidth, barHeight, 10, "rgba(255, 255, 255, 0.12)", 1);
+
+  ctx.font = `760 18px ${displayFont}`;
+  let legendX = barX;
+  for (const segment of segments) {
+    const label = `${segment.label} ${segment.count}`;
+    const labelWidth = ctx.measureText(label).width;
+    fillRoundedRect(ctx, legendX, 394, 14, 14, 4, segment.color);
+    ctx.fillStyle = palette.muted;
+    ctx.fillText(label, legendX + 22, 408);
+    legendX += labelWidth + 52;
+  }
+
+  ctx.font = `800 17px ${monoFont}`;
+  ctx.fillStyle = palette.faint;
+  ctx.fillText("CATEGORY BREAKDOWN", 480, 462);
+
+  ctx.font = `760 20px ${displayFont}`;
+  const chipStartX = 480;
+  const chipRows = [472, 508];
+  const chipColumns = 5;
+  const chipGap = 9;
+  const chipHeight = 30;
+  const chipWidth = 120;
+  const maxCategoryChips = chipRows.length * chipColumns;
+  const visibleCategoryCount =
+    data.categories.length > maxCategoryChips ? maxCategoryChips - 1 : maxCategoryChips;
+  const categoryChips = data.categories.slice(0, visibleCategoryCount).map((category) => ({
+    label: `${category.id}: ${category.score}`,
+    overflow: false
+  }));
+
+  if (data.categories.length > visibleCategoryCount) {
+    categoryChips.push({
+      label: `+${data.categories.length - visibleCategoryCount} more`,
+      overflow: true
+    });
+  }
+
+  const drawCategoryChip = (label: string, x: number, y: number, width: number, overflow = false) => {
+    fillRoundedRect(ctx, x, y, width, chipHeight, 15, overflow ? "#332d1d" : "#282419");
+    strokeRoundedRect(ctx, x, y, width, chipHeight, 15, "rgba(242, 184, 75, 0.18)", 1);
+    ctx.fillStyle = overflow ? palette.accentStrong : palette.text;
+    ctx.fillText(label, x + 14, y + 21);
+  };
+
+  categoryChips.forEach((chip, index) => {
+    const row = Math.floor(index / chipColumns);
+    const column = index % chipColumns;
+    const label = truncateCanvasText(ctx, chip.label, chipWidth - 28);
+    drawCategoryChip(label, chipStartX + column * (chipWidth + chipGap), chipRows[row], chipWidth, chip.overflow);
+  });
+
+  ctx.font = `700 18px ${displayFont}`;
+  ctx.fillStyle = palette.muted;
+  const meta = [
+    data.runModeLabel,
+    `${data.runsPerTest}x run${data.runsPerTest === 1 ? "" : "s"}`,
+    data.runDateLabel,
+    data.durationLabel ? `${data.durationLabel} total` : null
+  ].filter(Boolean).join(" · ");
+  ctx.textBaseline = "middle";
+  ctx.fillText(truncateCanvasText(ctx, meta, 760), 78, 570);
+
+  ctx.font = `800 18px ${monoFont}`;
+  ctx.fillStyle = palette.accentStrong;
+  ctx.textAlign = "right";
+  ctx.fillText(data.versionLabel, SHARE_CARD_WIDTH - 78, 570);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+}
+
+async function createShareCardBlob(data: ResultShareCardData): Promise<Blob> {
+  const canvas = document.createElement("canvas");
+  drawShareCardCanvas(canvas, data, await loadShareCardLogoImage());
+
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("Could not render share card."));
+        return;
+      }
+
+      resolve(blob);
+    }, "image/png");
+  });
 }
 
 function defaultProviderApiKeyPlaceholder(kind: BenchLocalProviderKind): string {
@@ -5083,6 +5657,7 @@ export function App() {
                             modelAvailabilityById={modelAvailabilityById}
                             checkingModelAvailability={checkingModelAvailability}
                             providers={draft.providers}
+                            appVersion={appMetadata?.version}
 	                            runSummary={activeRunSummary}
                               historyEntries={runHistories[activeInspection.id] ?? []}
 	                            liveRun={activeLiveRun}
@@ -6127,6 +6702,7 @@ function BenchmarkSection({
   modelAvailabilityById,
   checkingModelAvailability,
   providers,
+  appVersion,
   runSummary,
   historyEntries,
   liveRun,
@@ -6162,6 +6738,7 @@ function BenchmarkSection({
   modelAvailabilityById: Record<string, ModelAvailability>;
   checkingModelAvailability: Record<string, true>;
   providers: Record<string, BenchLocalProviderConfig>;
+  appVersion?: string | null;
   runSummary: BenchPackRunSummary | null;
   historyEntries: BenchPackRunHistoryEntry[];
   liveRun: LiveRunState | null;
@@ -6191,6 +6768,7 @@ function BenchmarkSection({
 }) {
   const [runModeOpen, setRunModeOpen] = useState(false);
   const [runsPerTestOpen, setRunsPerTestOpen] = useState(false);
+  const [shareCardData, setShareCardData] = useState<ResultShareCardData | null>(null);
   const runModeRef = useRef<HTMLDivElement | null>(null);
   const runsPerTestRef = useRef<HTMLDivElement | null>(null);
   const tableScrollViewportRef = useRef<HTMLDivElement | null>(null);
@@ -6903,6 +7481,17 @@ function BenchmarkSection({
               {Object.entries(runSummary.scores).map(([modelId, score]) => {
                 const model = selectedModels.find((candidate) => candidate.id === modelId);
                 const hasScoreData = (runSummary.resultsByModel[modelId]?.length ?? 0) > 0;
+                const shareRunModeLabel =
+                  EXECUTION_MODE_OPTIONS.find((option) => option.value === (runSummary.executionMode ?? executionMode))?.label ??
+                  currentExecutionModeLabel;
+                const shareData = buildResultShareCardData({
+                  runSummary,
+                  model,
+                  providers,
+                  score,
+                  runModeLabel: shareRunModeLabel,
+                  appVersion
+                });
                 const providerName = model ? getProviderDisplayName(providers, model.provider) : "";
                 const modelName = model?.model?.trim();
                 const modelSubtitle =
@@ -6912,9 +7501,21 @@ function BenchmarkSection({
 
                 return (
                   <div key={modelId} className="score-card score-card-compact">
-                    <div>
-                      <h3 style={{ margin: 0, fontSize: "1rem" }}>{model?.displayLabel ?? modelId}</h3>
-                      <p className="muted-copy" style={{ marginTop: "6px", fontSize: "0.76rem" }}>{modelSubtitle}</p>
+                    <div className="score-card-head">
+                      <div>
+                        <h3 style={{ margin: 0, fontSize: "1rem" }}>{model?.displayLabel ?? modelId}</h3>
+                        <p className="muted-copy" style={{ marginTop: "6px", fontSize: "0.76rem" }}>{modelSubtitle}</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="ghost-button ghost-button-compact score-share-button"
+                        disabled={!hasScoreData}
+                        title={hasScoreData ? "Preview share card" : "No results to share yet"}
+                        onClick={() => setShareCardData(shareData)}
+                      >
+                        <Share2 size={14} />
+                        Share
+                      </button>
                     </div>
                     <div className="score-card-foot">
                       <span className={`score-value${hasScoreData ? "" : " score-value-empty"}`}>
@@ -6935,7 +7536,116 @@ function BenchmarkSection({
           ) : null}
         </div>
       </div>
+      {shareCardData ? <ResultShareCardModal data={shareCardData} onClose={() => setShareCardData(null)} /> : null}
     </section>
+  );
+}
+
+function ResultShareCardModal({
+  data,
+  onClose
+}: {
+  data: ResultShareCardData;
+  onClose: () => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    let cancelled = false;
+
+    if (!canvas) {
+      return;
+    }
+
+    drawShareCardCanvas(canvas, data);
+    void loadShareCardLogoImage().then((logoImage) => {
+      if (!cancelled && canvasRef.current) {
+        drawShareCardCanvas(canvasRef.current, data, logoImage);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [data]);
+
+  const savePng = async () => {
+    const blob = await createShareCardBlob(data);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = data.fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setStatus("PNG saved.");
+  };
+
+  const copyImage = async () => {
+    type ClipboardItemConstructor = new (items: Record<string, Blob>) => ClipboardItem;
+    const clipboardItem = (window as typeof window & { ClipboardItem?: ClipboardItemConstructor }).ClipboardItem;
+
+    if (!navigator.clipboard?.write || !clipboardItem) {
+      setStatus("Image copy is unavailable in this environment. Save the PNG instead.");
+      return;
+    }
+
+    const blob = await createShareCardBlob(data);
+    await navigator.clipboard.write([new clipboardItem({ "image/png": blob })]);
+    setStatus("Copied image to clipboard.");
+  };
+
+  return (
+    <Modal
+      title="Share Result Card"
+      subtitle="Preview a social-ready PNG for this model result."
+      onClose={onClose}
+      onSubmit={() => void savePng().catch((error) => setStatus(error instanceof Error ? error.message : "Failed to save PNG."))}
+      submitLabel="Save PNG"
+      size="wide"
+      leadingActions={
+        <button
+          type="button"
+          className="ghost-button"
+          onClick={() => void copyImage().catch((error) => setStatus(error instanceof Error ? error.message : "Failed to copy image."))}
+        >
+          <Copy size={14} />
+          Copy Image
+        </button>
+      }
+    >
+      <div className="share-card-modal-body">
+        <div className="share-card-preview-shell">
+          <canvas
+            ref={canvasRef}
+            width={SHARE_CARD_PIXEL_WIDTH}
+            height={SHARE_CARD_PIXEL_HEIGHT}
+            className="share-card-canvas"
+            aria-label={`Share card preview for ${data.modelLabel}`}
+          />
+        </div>
+        <div className="share-card-meta-grid">
+          <div>
+            <span className="share-card-meta-label">Size</span>
+            <span className="share-card-meta-value">
+              {SHARE_CARD_PIXEL_WIDTH}x{SHARE_CARD_PIXEL_HEIGHT} PNG
+            </span>
+          </div>
+          <div>
+            <span className="share-card-meta-label">Result</span>
+            <span className="share-card-meta-value">{data.scoreValue} score / {data.completedCount} results</span>
+          </div>
+          <div>
+            <span className="share-card-meta-label">Filename</span>
+            <span className="share-card-meta-value">{data.fileName}</span>
+          </div>
+        </div>
+        {status ? <div className="share-card-feedback">{status}</div> : null}
+      </div>
+    </Modal>
   );
 }
 

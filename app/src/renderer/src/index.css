@@ -1487,6 +1487,22 @@ pre {
   gap: 12px;
 }
 
+.score-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+
+.score-card-head > div {
+  min-width: 0;
+}
+
+.score-share-button {
+  flex: 0 0 auto;
+}
+
 .score-card-foot {
   display: grid;
   gap: 10px;
@@ -1499,6 +1515,83 @@ pre {
 .category-chip {
   text-transform: none;
   letter-spacing: 0.01em;
+}
+
+.share-card-modal-body {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.dialog-body:has(.share-card-modal-body) {
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.share-card-preview-shell {
+  border-radius: 20px;
+  padding: 12px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 12%, transparent), transparent 38%),
+    var(--bg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.share-card-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 14px;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.28);
+  background: #11100d;
+}
+
+.share-card-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.share-card-meta-grid > div {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: var(--surface-muted);
+}
+
+.share-card-meta-label,
+.share-card-meta-value {
+  display: block;
+  min-width: 0;
+}
+
+.share-card-meta-label {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.share-card-meta-value {
+  margin-top: 6px;
+  color: var(--ink);
+  font-size: 0.84rem;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-card-feedback {
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--neutral-soft);
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
 }
 
 .table-scroll {
@@ -3817,6 +3910,10 @@ select.config-input {
 
   .agent-field-row .ghost-button {
     width: 100%;
+  }
+
+  .share-card-meta-grid {
+    grid-template-columns: 1fr;
   }
 
   .result-table {
