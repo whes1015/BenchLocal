@@ -5413,7 +5413,6 @@ export function App() {
           checkingModelAvailability={checkingModelAvailability}
           runSummary={tabRunSummary}
           loadedHistory={tabLoadedHistory}
-          historyEntries={runHistories[inspection.id] ?? []}
           isRunning={isTabRunning}
           isStopping={isTabStopping}
           onStartState={() => startWebBenchPackState(tab, inspection)}
@@ -5435,13 +5434,6 @@ export function App() {
                 ...(inspection.manifest?.samplingDefaults ?? {})
               },
               form: createSamplingForm(tab.samplingOverrides)
-            })
-          }
-          onOpenHistory={() =>
-            setHistoryModal({
-              benchPackId: inspection.id,
-              benchPackName: inspection.manifest?.name ?? inspection.id,
-              entries: runHistories[inspection.id] ?? []
             })
           }
           onHistorySaved={(summary) => void handleWebPackRunSummarySaved(tab.id, summary)}
@@ -7035,7 +7027,6 @@ function WebBenchPackSection({
   checkingModelAvailability,
   runSummary,
   loadedHistory,
-  historyEntries,
   isRunning,
   isStopping,
   onStartState,
@@ -7043,7 +7034,6 @@ function WebBenchPackSection({
   onRequestStop,
   onEditModels,
   onEditSampling,
-  onOpenHistory,
   onHistorySaved,
   onClearHistory
 }: {
@@ -7055,7 +7045,6 @@ function WebBenchPackSection({
   checkingModelAvailability: Record<string, true>;
   runSummary: BenchPackRunSummary | null;
   loadedHistory: LoadedHistoryEntry | null;
-  historyEntries: BenchPackRunHistoryEntry[];
   isRunning: boolean;
   isStopping: boolean;
   onStartState: () => void;
@@ -7063,7 +7052,6 @@ function WebBenchPackSection({
   onRequestStop: () => void;
   onEditModels: () => void;
   onEditSampling: () => void;
-  onOpenHistory: () => void;
   onHistorySaved: (summary: BenchPackRunSummary) => void;
   onClearHistory: () => void;
 }) {
@@ -7419,10 +7407,6 @@ function WebBenchPackSection({
               Back to Live
             </button>
           ) : null}
-          <button type="button" className="ghost-button" onClick={onOpenHistory} disabled={historyEntries.length === 0}>
-            <Logs size={14} />
-            Test Histories
-          </button>
           <button type="button" className="ghost-button" onClick={onEditSampling}>
             <SlidersHorizontal size={14} />
             Samplings
