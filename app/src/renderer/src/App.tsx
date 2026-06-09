@@ -34,6 +34,7 @@ import {
   Wrench,
   X
 } from "lucide-react";
+import { ExportResultButton } from "./ExportResultButton";
 import type {
   ArtifactRef,
   BenchLocalChatRequest,
@@ -8245,16 +8246,26 @@ function BenchmarkSection({
                         <h3 style={{ margin: 0, fontSize: "1rem" }}>{model?.displayLabel ?? modelId}</h3>
                         <p className="muted-copy" style={{ marginTop: "6px", fontSize: "0.76rem" }}>{modelSubtitle}</p>
                       </div>
-                      <button
-                        type="button"
-                        className="ghost-button ghost-button-compact score-share-button"
-                        disabled={!hasScoreData}
-                        title={hasScoreData ? "Preview share card" : "No results to share yet"}
-                        onClick={() => setShareCardData(shareData)}
-                      >
-                        <Share2 size={14} />
-                        Share
-                      </button>
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px", flex: "0 0 auto" }}>
+                        <ExportResultButton
+                          runSummary={runSummary}
+                          model={model}
+                          providers={providers}
+                          score={score}
+                          scenarios={scenarios}
+                          disabled={!hasScoreData}
+                        />
+                        <button
+                          type="button"
+                          className="ghost-button ghost-button-compact score-share-button"
+                          disabled={!hasScoreData}
+                          title={hasScoreData ? "Preview share card" : "No results to share yet"}
+                          onClick={() => setShareCardData(shareData)}
+                        >
+                          <Share2 size={14} />
+                          Share
+                        </button>
+                      </div>
                     </div>
                     <div className="score-card-foot">
                       <span className={`score-value${hasScoreData ? "" : " score-value-empty"}`}>
