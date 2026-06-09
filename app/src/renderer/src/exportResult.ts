@@ -29,6 +29,37 @@ function getModelDisplayIdentifier(model: Pick<BenchLocalModelConfig, "id" | "mo
   return model.model.trim() || model.id.split(":").slice(1).join(":").trim() || model.id;
 }
 
+// 由 id / 名稱關鍵字猜測廠牌(org),讓匯出直接帶出 logo 用的 org。猜不到回 ""(由使用者補)。
+const EXPORT_ORG_KEYWORDS: ReadonlyArray<readonly [string, string]> = [
+  ["claude", "Anthropic"],
+  ["gpt", "OpenAI"],
+  ["openai", "OpenAI"],
+  ["gemini", "Google"],
+  ["gemma", "Google"],
+  ["qwen", "Qwen"],
+  ["llama", "Meta"],
+  ["mixtral", "Mistral AI"],
+  ["mistral", "Mistral AI"],
+  ["phi", "Microsoft"],
+  ["deepseek", "DeepSeek"],
+  ["mellum", "JetBrains"],
+  ["grok", "xAI"],
+  ["command", "Cohere"]
+];
+
+function guessExportOrg(id: string, name: string): string {
+  if (id.includes("/")) {
+    return id.split("/")[0]; // HuggingFace 形式 org/model
+  }
+  const haystack = `${id} ${name}`.toLowerCase();
+  for (const [keyword, org] of EXPORT_ORG_KEYWORDS) {
+    if (haystack.includes(keyword)) {
+      return org;
+    }
+  }
+  return "";
+}
+
 function normalizeRunsPerTest(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 1 ? Math.floor(value) : 1;
 }
@@ -66,6 +97,8 @@ export function buildResultExportJson({
   appVersion?: string;
 }) {
   const modelId = model?.id ?? "model";
+  const fullId = model ? getModelDisplayIdentifier(model) : modelId;
+  const displayName = model?.displayLabel ?? model?.label ?? fullId;
   const modelResults = runSummary.resultsByModel[modelId] ?? [];
   const resultByScenarioId = new Map(modelResults.map((result) => [result.scenarioId, result]));
   const orderedScenarioIds =
@@ -92,9 +125,9 @@ export function buildResultExportJson({
     },
     deployment: isCloud ? "cloud" : "local",
     model: {
-      name: model?.displayLabel ?? model?.label ?? (model ? getModelDisplayIdentifier(model) : modelId),
-      id: model ? getModelDisplayIdentifier(model) : modelId, // 完整識別碼(HF 形式 org/model 可自動帶出廠牌 logo)
-      org: "", // 廠牌，留空時 llm-pk 會由 id 前綴推得
+      name: displayName, // 重點展示的名稱(來自 BenchLocal 的顯示標籤)
+      id: fullId, // 完整識別碼(HF 形式 org/model 可自動帶出廠牌 logo)
+      org: guessExportOrg(fullId, displayName), // 由 id 前綴或名稱關鍵字猜廠牌(可手動修正)
       access: "open", // 開源 / 閉源無法自動判斷，預設 open，閉源請改成 "closed"
       family: { name: "", ver: "" },
       type: "",
