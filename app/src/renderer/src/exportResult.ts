@@ -118,22 +118,23 @@ export function buildResultExportJson({
   // 雲端方案沒有本地硬體與量化資訊（device 留空的情況）；本地方案輸出空白骨架供手動補全。
   return {
     BenchLocal: appVersion ?? "",
-    author: "", // GitHub 帳號，匯出後請手動填入(用於排行榜頭像)
+    results_upload: "", // 上傳跑分者的 GitHub 帳號，匯出後請手動填入
     BenchPack: {
       name: runSummary.benchPackName || runSummary.benchPackId,
       ver: runSummary.packVersion ?? ""
     },
     deployment: isCloud ? "cloud" : "local",
     model: {
-      name: displayName, // 重點展示的名稱(來自 BenchLocal 的顯示標籤)
-      id: fullId, // 完整識別碼(HF 形式 org/model 可自動帶出廠牌 logo)
+      id: fullId, // 完整識別碼(建議 HF 形式 org/model，可自動帶出廠牌 logo)
+      name: displayName, // 重點展示的乾淨名稱(來自 BenchLocal 顯示標籤)
       org: guessExportOrg(fullId, displayName), // 由 id 前綴或名稱關鍵字猜廠牌(可手動修正)
-      access: "open", // 開源 / 閉源無法自動判斷，預設 open，閉源請改成 "closed"
+      access: "open", // open=開源權重 / closed=閉源(與 deployment 無關)，無法自動判斷請依實際修正
       family: { name: "", ver: "" },
-      type: "",
+      type: "", // MoE / Dense（請補上）
+      thinking: false, // 是否具備 thinking / reasoning 模式（請依實際修正）
       size: { params: "", active: "" },
       ...(isCloud ? {} : { quantization: { format: "", level: "", method: "" } }),
-      link: ""
+      link: "" // 選填，格式 hugging_face:{user}:{repo}
     },
     backend: {
       name: (providerKind ? EXPORT_BACKEND_NAME_BY_KIND[providerKind] : "") ?? "",
